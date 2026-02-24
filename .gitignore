@@ -1,0 +1,39 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Coverage and profiling outputs
+*.out
+coverage.out
+cover.out
+cpu.out
+mem.out
+
+# Build artifacts
+bin/
+dist/
+/easy-server
+
+# Go workspace files (optional/local)
+go.work
+go.work.sum
+
+# Dependency directories (usually not committed unless intentionally vendoring)
+vendor/
+
+# macOS
+.DS_Store
+
+# Editors / IDEs
+.idea/
+.vscode/
+
+# Local env files
+.env
+.env.*
