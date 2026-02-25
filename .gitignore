@@ -19,6 +19,7 @@ mem.out
 bin/
 dist/
 /easy-server
+/compare-csv
 
 # Go workspace files (optional/local)
 go.work
@@ -41,3 +42,5 @@ __pycache__/
 # Local env files
 .env
 .env.*
+
+outputs

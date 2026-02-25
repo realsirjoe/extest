@@ -1,6 +1,6 @@
 # Comparison Baseline Results (Python v1)
 
-These are the current Python comparator outputs used as a translation baseline for the Go port.
+These are the historical Python comparator outputs used as a translation baseline for the Go port.
 
 Reference file:
 
@@ -41,3 +41,7 @@ Candidates tested:
 ## Translation Goal
 
 The Go implementation should produce the same values (or numerically equivalent values within tiny floating point tolerance) for these three comparisons.
+
+Current comparator runtime:
+
+- `cmd/compare-csv` (Go)

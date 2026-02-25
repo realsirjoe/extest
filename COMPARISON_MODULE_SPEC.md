@@ -257,21 +257,20 @@ Keep this module independent from the server and extraction code.
 
 Suggested layout:
 
-- `comparison/`
-  - `README.md` (usage)
-  - `schema_profile.py`
-  - `normalization.py`
-  - `similarity.py`
-  - `column_mapping.py`
-  - `row_alignment.py`
-  - `scorer.py`
-  - `report_types.py`
-  - `compare_csv.py` (CLI entry point)
+- `comparison/` (language-agnostic design area) or Go package equivalents
+  - schema profiling
+  - normalization
+  - similarity
+  - column mapping
+  - row alignment
+  - scoring
+  - report types
+  - CLI entry point
 
 Or for a smaller first pass:
 
-- `scripts/compare_csvs.py`
-- `scripts/comparison_lib/` for internals
+- `cmd/compare-csv/` (Go CLI)
+- internal comparison package(s) in Go
 
 ## v1 Deliverable (Recommended)
 
