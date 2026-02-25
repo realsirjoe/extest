@@ -953,6 +953,76 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
       color: var(--ink);
       font-family: "Georgia", "Times New Roman", serif;
     }
+    .page-shell { max-width: 1180px; margin: 0 auto; padding: 20px 20px 0; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 10px 14px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: rgba(255,255,255,0.72);
+      border-radius: 999px;
+      backdrop-filter: blur(6px);
+      position: sticky;
+      top: 10px;
+      z-index: 10;
+    }
+    .logo {
+      font-size: 14px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .search-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 460px;
+      min-width: 240px;
+      max-width: 700px;
+      margin: 0 8px;
+    }
+    .search-input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: rgba(255,255,255,0.95);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 14px;
+      outline: none;
+      color: #0f172a;
+    }
+    .search-input:focus {
+      border-color: rgba(15, 118, 110, 0.4);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+    }
+    .search-submit {
+      border: 1px solid rgba(15, 118, 110, 0.20);
+      background: #0f766e;
+      color: #fff;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .top-actions { display: flex; gap: 8px; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.85);
+      font-size: 13px;
+      text-decoration: none;
+      color: #1f2937;
+    }
     .wrap { max-width: 1040px; margin: 40px auto 64px; padding: 0 20px; }
     .crumbs { font-size: 14px; color: var(--muted); margin-bottom: 14px; text-transform: capitalize; }
     .card {
@@ -1105,9 +1175,25 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
     @media (max-width: 560px) {
       .recs-grid { grid-template-columns: 1fr; }
     }
+    @media (max-width: 760px) {
+      .topbar { border-radius: 18px; }
+    }
   </style>
 </head>
 <body>
+  <div class="page-shell">
+    <div class="topbar">
+      <a class="logo" href="/">dimi</a>
+      <form class="search-form" action="/search" method="get" role="search">
+        <input class="search-input" type="search" name="q" minlength="3" required placeholder="Search products, brands, categories" />
+        <button class="search-submit" type="submit">Search</button>
+      </form>
+      <div class="top-actions">
+        <a class="chip" href="/">Offers</a>
+        <a class="chip" href="#">Account</a>
+      </div>
+    </div>
+  </div>
   <div class="wrap">
     <div class="crumbs" id="product-crumbs">Loading product...</div>
     <div class="card">
