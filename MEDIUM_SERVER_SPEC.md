@@ -2,6 +2,12 @@
 
 This document describes the intended behavior of `cmd/medium-server`.
 
+## Available Servers (Context)
+
+- `easy-server` (implemented): easiest; public JSON APIs + open sitemaps.
+- `medium-server` (implemented): medium; no public JSON APIs, inline JSON embedded in HTML.
+- `hard-server` (planned): hardest; additional discovery and anti-extraction constraints.
+
 ## Goal
 
 `medium-server` should be harder to extract than `easy-server` by removing direct public JSON API access while still serving the same underlying product data.

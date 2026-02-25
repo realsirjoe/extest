@@ -12,8 +12,14 @@ The goal is to test extraction quality without hitting real websites and without
 
 ## Project Status
 
-- Implemented: reference data tooling (Go), comparison module (Go), `easy` storefront server (Go), internal candidate shuffler utility (Go)
-- Planned / documented: `medium` and `hard` challenge servers (see `SPEC.md`)
+- Implemented: reference data tooling (Go), comparison module (Go), `easy-server` (Go), `medium-server` (Go), internal candidate shuffler utility (Go)
+- Planned / documented: `hard` challenge server (see `SPEC.md`)
+
+## Available Servers (Current)
+
+- `easy-server`: easiest variant; public JSON APIs + open sitemaps + low extraction friction.
+- `medium-server`: medium variant; no public JSON APIs, data embedded inline in HTML source, harder than easy but still structured.
+- `hard-server` (planned): hardest variant; reduced discoverability and additional extraction friction/constraints.
 
 ## High-Level Architecture
 
@@ -34,8 +40,8 @@ The goal is to test extraction quality without hitting real websites and without
                  |                     v
                  |          +---------------------------+
                  |          | test server(s)            |
-                 |          | cmd/easy-server (+ future |
-                 |          | medium / hard variants)   |
+                 |          | easy / medium (now)       |
+                 |          | hard (planned)            |
                  |          +---------------------------+
                  |                     |
                  |                     v
@@ -91,7 +97,7 @@ Useful flags:
 - `--profile`
 - `--limit`
 
-### 2) Test Storefront Servers (`cmd/easy-server`)
+### 2) Test Storefront Servers (`cmd/easy-server`, `cmd/medium-server`)
 
 The server reads the generated SQLite DB and exposes:
 
@@ -102,13 +108,18 @@ The server reads the generated SQLite DB and exposes:
 
 Current implementation:
 
-- `easy` variant is implemented (`cmd/easy-server`)
-- `medium` / `hard` variants are planned (see `SPEC.md`)
+- `cmd/easy-server`: easiest; public APIs and open sitemap routes.
+- `cmd/medium-server`: medium; no public APIs, data is embedded inline in HTML.
+- `hard` variant: planned (see `SPEC.md`)
 
 Example:
 
 ```bash
 go run ./cmd/easy-server -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:8080
+```
+
+```bash
+go run ./cmd/medium-server -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:8082
 ```
 
 Then open:
@@ -194,8 +205,8 @@ go run ./cmd/shuffle-csv \
 
 See `SPEC.md` for the draft challenge design.
 
-- `easy`: JSON-backed storefront, easier discovery
-- `medium`: HTML-first storefront with stable selectors
+- `easy` (implemented): public JSON APIs + open sitemaps (lowest friction)
+- `medium` (implemented): hidden public APIs, inline JSON in HTML source (moderate friction)
 - `hard`: reduced discoverability (e.g. closed sitemap, pagination, anti-bot constraints)
 
 The comparison module is designed to stay reusable across all variants because it only depends on reference/candidate tabular data.
@@ -208,6 +219,8 @@ If you already have a local source JSONL file at `outputs/sample_products_all.jl
 make build-all
 bin/process-products
 bin/easy-server -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:8080
+# or:
+# bin/medium-server -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:8082
 ```
 
 Then run your extractor against the local server and compare its CSV output:
@@ -230,6 +243,8 @@ Or run the server directly with the provided Make target:
 
 ```bash
 make serve-easy
+# or
+make serve-medium
 ```
 
 ## Testing
@@ -250,7 +265,8 @@ Notes:
 ```text
 cmd/
   compare-csv/      CSV comparison/scoring CLI
-  easy-server/      easy storefront + APIs
+  easy-server/      easiest storefront (public APIs + sitemap)
+  medium-server/    medium storefront (no public APIs; inline JSON in HTML)
   process-products/ reference data builder (JSONL -> CSV/SQLite/profile)
   shuffle-csv/      internal candidate generator for comparator tests
 
@@ -258,6 +274,8 @@ testdata/           local test fixtures directory (tracked via .gitkeep)
 outputs/            local generated artifacts (ignored)
 
 SPEC.md                     challenge-variant roadmap
+EASY_SERVER_SPEC.md         easy variant behavior (public API + sitemap)
+MEDIUM_SERVER_SPEC.md       medium variant behavior (inline JSON, no public API)
 COMPARISON_MODULE_SPEC.md   comparator design notes
 COMPARISON_BASELINE_RESULTS.md  parity/baseline expectations
 ```
