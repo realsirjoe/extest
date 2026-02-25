@@ -218,26 +218,9 @@ func main() {
 			return
 		}
 
-		row, err := fetchByID(db, table, cols, *idCol, id)
-		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			log.Printf("fetch error: %v", err)
-			return
-		}
-
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := productPageTemplate.Execute(w, map[string]any{
-			"id":       id,
-			"name":     firstNonEmpty(getString(row, "name"), getString(row, "title_headline"), "Product "+id),
-			"brand":    firstNonEmpty(getString(row, "brand"), getString(row, "seo_brand"), "Unknown brand"),
-			"price":    firstNonEmpty(getString(row, "price_raw"), getString(row, "price_eur"), getString(row, "metadata_price_eur")),
-			"category": firstNonEmpty(getString(row, "category_path"), getString(row, "seo_category")),
-			"image":    firstNonEmpty(getString(row, "image"), getString(row, "image_url"), getString(row, "img"), getString(row, "thumbnail")),
-			"desc":     firstNonEmpty(getString(row, "desc_productbeschreibung"), getString(row, "metadata_description")),
+			"id": id,
 		}); err != nil {
 			log.Printf("template error: %v", err)
 		}
@@ -724,7 +707,7 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{{ .name }}</title>
+  <title>Product {{ .id }} | dimi</title>
   <style>
     :root {
       --bg: #f5f3ef;
@@ -878,25 +861,26 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
 </head>
 <body>
   <div class="wrap">
-    <div class="crumbs">{{ .category }}</div>
+    <div class="crumbs" id="product-crumbs">Loading product...</div>
     <div class="card">
-      <div class="media">
-        {{ if .image }}<img src="{{ .image }}" alt="{{ .name }}" />{{ else }}No image{{ end }}
+      <div class="media" id="product-media">
+        <span id="product-media-fallback">Loading image...</span>
       </div>
       <div>
-        <div class="brand">{{ .brand }}</div>
-        <h1>{{ .name }}</h1>
+        <div class="brand" id="product-brand">Loading brand…</div>
+        <h1 id="product-name">Loading product…</h1>
         <div class="price-row">
-          <div class="price">{{ if .price }}{{ .price }}{{ else }}Price not available{{ end }}</div>
+          <div class="price" id="product-price">Loading price…</div>
           <div class="pill">In stock</div>
         </div>
-        <div class="meta">
-          <span>Product ID: {{ .id }}</span>
-          {{ if .category }}<span>Category: {{ .category }}</span>{{ end }}
+        <div class="meta" id="product-meta">
+          <span>Product ID: <span id="product-id">{{ .id }}</span></span>
+          <span id="product-category-wrap" hidden>Category: <span id="product-category"></span></span>
         </div>
         <a class="cta" href="#">Add to cart</a>
         <a class="cta-secondary" href="#">Wishlist</a>
-        {{ if .desc }}<div class="desc">{{ .desc }}</div>{{ end }}
+        <div class="desc" id="product-desc" hidden></div>
+        <div class="meta" id="product-load-status">Loading product details from API…</div>
         <div class="specs">
           <div>Shipping: 2-4 days</div>
           <div>Returns: 30 days</div>
@@ -915,9 +899,20 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
   <script>
     (function () {
       var productId = {{ .id }};
+      var productApiUrl = "/api/product/" + encodeURIComponent(productId);
       var statusEl = document.getElementById("similar-status");
       var gridEl = document.getElementById("similar-grid");
       var sectionEl = document.getElementById("similar-products");
+      var crumbsEl = document.getElementById("product-crumbs");
+      var mediaEl = document.getElementById("product-media");
+      var mediaFallbackEl = document.getElementById("product-media-fallback");
+      var brandEl = document.getElementById("product-brand");
+      var nameEl = document.getElementById("product-name");
+      var priceEl = document.getElementById("product-price");
+      var catWrapEl = document.getElementById("product-category-wrap");
+      var catEl = document.getElementById("product-category");
+      var descEl = document.getElementById("product-desc");
+      var loadStatusEl = document.getElementById("product-load-status");
       if (!productId || !statusEl || !gridEl || !sectionEl) return;
 
       function escapeHtml(s) {
@@ -938,6 +933,98 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
           return item.price_eur.toFixed(2) + " " + (item.currency || "EUR");
         }
       }
+
+      function firstNonEmpty() {
+        for (var i = 0; i < arguments.length; i++) {
+          var v = arguments[i];
+          if (v === null || v === undefined) continue;
+          var s = String(v).trim();
+          if (s) return s;
+        }
+        return "";
+      }
+
+      function setText(el, value, fallback) {
+        if (!el) return;
+        el.textContent = firstNonEmpty(value, fallback);
+      }
+
+      function formatMainPrice(row) {
+        var raw = firstNonEmpty(row.price_raw);
+        if (raw) return raw;
+        if (typeof row.price_eur === "number" && !Number.isNaN(row.price_eur)) {
+          return formatPrice({ price_eur: row.price_eur, currency: row.currency || "EUR" }) || "Price not available";
+        }
+        var meta = firstNonEmpty(row.metadata_price_eur);
+        return meta || "Price not available";
+      }
+
+      function setMedia(row, name) {
+        if (!mediaEl) return;
+        var src = firstNonEmpty(row.image, row.image_url, row.img, row.thumbnail);
+        if (!src) {
+          if (mediaFallbackEl) mediaFallbackEl.textContent = "No image";
+          return;
+        }
+        mediaEl.innerHTML = '<img src="' + escapeHtml(src) + '" alt="' + escapeHtml(name || "Product") + '" />';
+      }
+
+      function hydrateProduct(row) {
+        var name = firstNonEmpty(row.name, row.title_headline, "Product " + productId);
+        var brand = firstNonEmpty(row.brand, row.seo_brand, "Unknown brand");
+        var category = firstNonEmpty(row.category_path, row.seo_category);
+        var desc = firstNonEmpty(row.desc_productbeschreibung, row.metadata_description);
+
+        document.title = name + " | dimi";
+        if (crumbsEl) crumbsEl.textContent = category || "Product details";
+        setMedia(row, name);
+        setText(brandEl, brand, "Unknown brand");
+        setText(nameEl, name, "Product");
+        setText(priceEl, formatMainPrice(row), "Price not available");
+
+        if (catWrapEl && catEl) {
+          if (category) {
+            catEl.textContent = category;
+            catWrapEl.hidden = false;
+          } else {
+            catWrapEl.hidden = true;
+          }
+        }
+
+        if (descEl) {
+          if (desc) {
+            descEl.textContent = desc;
+            descEl.hidden = false;
+          } else {
+            descEl.hidden = true;
+          }
+        }
+        if (loadStatusEl) {
+          loadStatusEl.textContent = "Rendered client-side from /api/product/" + productId;
+        }
+      }
+
+      fetch(productApiUrl, { headers: { "Accept": "application/json" } })
+        .then(function (res) {
+          if (res.status === 404) throw new Error("NOT_FOUND");
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        })
+        .then(function (row) {
+          hydrateProduct(row || {});
+        })
+        .catch(function (err) {
+          if (loadStatusEl) {
+            loadStatusEl.textContent = err && err.message === "NOT_FOUND"
+              ? "Product not found."
+              : "Could not load product details right now.";
+          }
+          if (crumbsEl) crumbsEl.textContent = "Product details";
+          if (brandEl) brandEl.textContent = "Unavailable";
+          if (nameEl) nameEl.textContent = "Product " + productId;
+          if (priceEl) priceEl.textContent = "Price not available";
+          if (mediaFallbackEl) mediaFallbackEl.textContent = "No image";
+        });
 
       fetch("/api/product/" + encodeURIComponent(productId) + "/similar", { headers: { "Accept": "application/json" } })
         .then(function (res) {
