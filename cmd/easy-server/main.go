@@ -1480,6 +1480,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
       margin-top: 26px;
       display: grid;
       gap: 18px;
+      scroll-margin-top: 84px;
     }
     .section {
       border: 1px solid var(--line);
@@ -1613,7 +1614,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
             <button class="btn btn-primary" id="scroll-sections" type="button">Browse Collections</button>
             <a class="btn btn-secondary" href="#">Shop New Arrivals</a>
           </div>
-          <div class="status" id="home-status">Loading homepage collections...</div>
+          <div class="status" id="home-status" hidden></div>
         </div>
         <aside class="hero-panel">
           <h2>Shop by what matters today</h2>
@@ -1646,12 +1647,36 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
   <script>
     (function () {
       var statusEl = document.getElementById("home-status");
+      var topbarEl = document.querySelector(".topbar");
       var sectionsEl = document.getElementById("sections");
       var scrollBtn = document.getElementById("scroll-sections");
 
       if (scrollBtn && sectionsEl) {
         scrollBtn.addEventListener("click", function () {
-          sectionsEl.scrollIntoView({ behavior: "smooth", block: "start" });
+          var targetEl = sectionsEl.querySelector(".section") || sectionsEl;
+          function desiredTopOffset() {
+            var topbarHeight = topbarEl ? topbarEl.getBoundingClientRect().height : 0;
+            var stickyTop = 0;
+            if (topbarEl && window.getComputedStyle) {
+              var topValue = window.getComputedStyle(topbarEl).top || "0";
+              var parsedTop = parseFloat(topValue);
+              if (Number.isFinite(parsedTop)) stickyTop = parsedTop;
+            }
+            return topbarHeight + stickyTop + 18;
+          }
+
+          var targetY = window.scrollY + targetEl.getBoundingClientRect().top - desiredTopOffset();
+          window.scrollTo({ top: Math.max(0, targetY), behavior: "smooth" });
+
+          // Post-scroll correction: measure actual overlap after sticky positioning settles.
+          window.setTimeout(function () {
+            var desiredTop = desiredTopOffset();
+            var actualTop = targetEl.getBoundingClientRect().top;
+            var delta = actualTop - desiredTop;
+            if (Math.abs(delta) > 2) {
+              window.scrollBy({ top: delta, behavior: "auto" });
+            }
+          }, 420);
         });
       }
 
@@ -1731,16 +1756,15 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
         .then(function (data) {
           var sections = Array.isArray(data.sections) ? data.sections : [];
           if (sections.length === 0) {
+            statusEl.hidden = false;
             statusEl.textContent = "No homepage collections available right now.";
             return;
           }
           sectionsEl.innerHTML = sections.map(renderSection).join("");
-          statusEl.textContent = "Collections loaded.";
-          setTimeout(function () {
-            if (statusEl) statusEl.hidden = true;
-          }, 1200);
+          statusEl.hidden = true;
         })
         .catch(function () {
+          statusEl.hidden = false;
           statusEl.textContent = "Could not load homepage collections right now.";
         });
     })();
