@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 const defaultAddr = "127.0.0.1:18744"
 const sitemapProtocolMaxURLs = 50000
 const defaultSitemapChunkSize = 10000
+const searchMinChars = 3
+const searchPageSize = 10
 
 func main() {
 	flag.Usage = func() {
@@ -124,6 +127,45 @@ func main() {
 		baseURL := requestBaseURL(r)
 		payload := buildProductURLSetXML(baseURL, ids)
 		writeXML(w, payload)
+	})
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search" {
+			http.NotFound(w, r)
+			return
+		}
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		page := 1
+		var searchData any = nil
+		var searchError string
+		if q != "" {
+			var ok bool
+			if len([]rune(q)) < searchMinChars {
+				searchError = fmt.Sprintf("query must be at least %d characters", searchMinChars)
+			} else if page, ok = parsePageQueryParam(r, "page", 1); !ok {
+				searchError = "invalid page"
+			} else {
+				offset, ok := pageOffset(page, searchPageSize)
+				if !ok {
+					searchError = "page value is too large"
+				} else {
+					payload, err := fetchSearchPayload(db, table, cols, *idCol, q, page, searchPageSize, offset)
+					if err != nil {
+						searchError = "Could not load search results right now."
+						log.Printf("search error: %v", err)
+					} else {
+						searchData = payload
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := searchPageTemplate.Execute(w, map[string]any{
+			"title":            "Search | dimi",
+			"search_data_json": mustJSONTemplateJS(searchData),
+			"search_error":     searchError,
+		}); err != nil {
+			log.Printf("template error: %v", err)
+		}
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -507,6 +549,21 @@ type homeSection struct {
 	Items       []map[string]any `json:"items"`
 }
 
+type searchPayload struct {
+	Query          string           `json:"query"`
+	MinQueryLength int              `json:"min_query_length"`
+	Page           int              `json:"page"`
+	MinPage        int              `json:"min_page"`
+	MaxPage        int              `json:"max_page"`
+	PerPage        int              `json:"per_page"`
+	Offset         int              `json:"offset"`
+	Total          int              `json:"total"`
+	TotalPages     int              `json:"total_pages"`
+	Returned       int              `json:"returned"`
+	SearchFields   []string         `json:"search_fields"`
+	Items          []map[string]any `json:"items"`
+}
+
 func fetchHomePayload(db *sql.DB, table string) (homePayload, error) {
 	sections := []homeSection{}
 
@@ -633,6 +690,187 @@ func fetchHomeSectionItems(db *sql.DB, table, where, order string, limit int, ar
 	return out, nil
 }
 
+func fetchSearchPayload(db *sql.DB, table string, cols []string, idCol, query string, page, perPage, offset int) (searchPayload, error) {
+	searchFields := make([]string, 0, 3)
+	for _, c := range []string{"name", "brand", "category_path"} {
+		if contains(cols, c) {
+			searchFields = append(searchFields, c)
+		}
+	}
+	if len(searchFields) == 0 {
+		return searchPayload{}, fmt.Errorf("no searchable columns available")
+	}
+
+	idSelectName := "gtin"
+	if !contains(cols, "gtin") {
+		idSelectName = idCol
+	}
+	if !contains(cols, idSelectName) {
+		return searchPayload{}, fmt.Errorf("id column %q not found for search result selection", idSelectName)
+	}
+
+	pattern := "%" + escapeLikePattern(query) + "%"
+	whereParts := make([]string, 0, len(searchFields))
+	whereArgs := make([]any, 0, len(searchFields))
+	for _, f := range searchFields {
+		whereParts = append(whereParts, fmt.Sprintf("%s LIKE ? ESCAPE '\\'", quoteIdent(f)))
+		whereArgs = append(whereArgs, pattern)
+	}
+	whereClause := strings.Join(whereParts, " OR ")
+	tableQ := quoteIdent(table)
+
+	countQ := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE (%s)", tableQ, whereClause)
+	var total int
+	if err := db.QueryRow(countQ, whereArgs...).Scan(&total); err != nil {
+		return searchPayload{}, err
+	}
+
+	items, err := fetchSearchItems(db, table, searchFields, idSelectName, perPage, offset, whereClause, whereArgs...)
+	if err != nil {
+		return searchPayload{}, err
+	}
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + perPage - 1) / perPage
+	}
+
+	return searchPayload{
+		Query:          query,
+		MinQueryLength: searchMinChars,
+		Page:           page,
+		MinPage:        1,
+		MaxPage:        totalPages,
+		PerPage:        perPage,
+		Offset:         offset,
+		Total:          total,
+		TotalPages:     totalPages,
+		Returned:       len(items),
+		SearchFields:   searchFields,
+		Items:          items,
+	}, nil
+}
+
+func fetchSearchItems(db *sql.DB, table string, searchFields []string, idCol string, limit, offset int, whereClause string, whereArgs ...any) ([]map[string]any, error) {
+	tableQ := quoteIdent(table)
+	idColQ := quoteIdent(idCol)
+	orderClauses := make([]string, 0, len(searchFields)+3)
+	for _, f := range searchFields {
+		fq := quoteIdent(f)
+		orderClauses = append(orderClauses, fmt.Sprintf("CASE WHEN %s LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END", fq))
+	}
+	orderClauses = append(orderClauses, "rating_count DESC", "rating_value DESC", quoteIdent("name")+" ASC")
+	orderClause := strings.Join(orderClauses, ", ")
+
+	args := make([]any, 0, len(whereArgs)+len(searchFields)+2)
+	args = append(args, whereArgs...)
+	// Use q% ranking pattern derived from the substring pattern input.
+	if len(whereArgs) > 0 {
+		if substrPattern, ok := whereArgs[0].(string); ok {
+			prefix := prefixLikePatternFromSubstringPattern(substrPattern)
+			for range searchFields {
+				args = append(args, prefix)
+			}
+		}
+	}
+	args = append(args, limit, offset)
+
+	q := fmt.Sprintf(
+		`SELECT %s, name, brand, price_eur, currency, category_path, rating_value, rating_count
+		 FROM %s
+		 WHERE (%s)
+		 ORDER BY %s
+		 LIMIT ? OFFSET ?`,
+		idColQ, tableQ, whereClause, orderClause,
+	)
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var idVal, name, brand, currency, category sql.NullString
+		var price sql.NullFloat64
+		var ratingVal sql.NullFloat64
+		var ratingCount sql.NullInt64
+		if err := rows.Scan(&idVal, &name, &brand, &price, &currency, &category, &ratingVal, &ratingCount); err != nil {
+			return nil, err
+		}
+		id := idVal.String
+		item := map[string]any{
+			"id":            id,
+			"name":          name.String,
+			"brand":         brand.String,
+			"price_eur":     price.Float64,
+			"currency":      currency.String,
+			"category_path": category.String,
+			"rating_value":  ratingVal.Float64,
+			"rating_count":  ratingCount.Int64,
+			"product_path":  "/product/" + id,
+		}
+		if idCol == "gtin" {
+			item["gtin"] = id
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func escapeLikePattern(s string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(s)
+}
+
+func prefixLikePatternFromSubstringPattern(substrPattern string) string {
+	trimmed := strings.TrimPrefix(strings.TrimSuffix(substrPattern, "%"), "%")
+	return trimmed + "%"
+}
+
+func parsePageQueryParam(r *http.Request, key string, fallback int) (int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return fallback, true
+	}
+	n64, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n64 < 1 {
+		return 0, false
+	}
+	if n64 > maxIntValue() {
+		return 0, false
+	}
+	return int(n64), true
+}
+
+func pageOffset(page, perPage int) (int, bool) {
+	if page < 1 || perPage < 1 {
+		return 0, false
+	}
+	p := int64(page - 1)
+	sz := int64(perPage)
+	if p > maxIntValue()/sz {
+		return 0, false
+	}
+	return int(p * sz), true
+}
+
+func maxIntValue() int64 {
+	return int64(^uint(0) >> 1)
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		log.Printf("encode error: %v", err)
+	}
+}
+
 func normalizeValue(v any) any {
 	switch t := v.(type) {
 	case []byte:
@@ -690,6 +928,76 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
       color: var(--ink);
       font-family: "Georgia", "Times New Roman", serif;
     }
+    .page-shell { max-width: 1180px; margin: 0 auto; padding: 20px 20px 0; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 10px 14px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: rgba(255,255,255,0.72);
+      border-radius: 999px;
+      backdrop-filter: blur(6px);
+      position: sticky;
+      top: 10px;
+      z-index: 10;
+    }
+    .logo {
+      font-size: 14px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .search-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 460px;
+      min-width: 240px;
+      max-width: 700px;
+      margin: 0 8px;
+    }
+    .search-input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: rgba(255,255,255,0.95);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 14px;
+      outline: none;
+      color: #0f172a;
+    }
+    .search-input:focus {
+      border-color: rgba(15, 118, 110, 0.4);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+    }
+    .search-submit {
+      border: 1px solid rgba(15, 118, 110, 0.20);
+      background: #0f766e;
+      color: #fff;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .top-actions { display: flex; gap: 8px; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.85);
+      font-size: 13px;
+      text-decoration: none;
+      color: #1f2937;
+    }
     .wrap { max-width: 1040px; margin: 40px auto 64px; padding: 0 20px; }
     .crumbs { font-size: 14px; color: var(--muted); margin-bottom: 14px; text-transform: capitalize; }
     .card {
@@ -746,8 +1054,30 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
       margin-left: 8px;
     }
     .desc { margin-top: 18px; line-height: 1.7; font-size: 16px; color: #1f2937; max-width: 60ch; }
+    .rating-box {
+      margin-top: 16px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #f8fafc;
+      padding: 12px 14px;
+    }
+    .rating-label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+    .rating-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .rating-stars { color: #f59e0b; letter-spacing: 1px; font-size: 16px; }
+    .rating-text { color: #334155; font-size: 14px; }
     .specs { margin-top: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; font-size: 14px; color: var(--muted); }
     .specs div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .details {
+      margin-top: 18px;
+    }
+    .details h2 { margin: 0 0 6px; font-size: 18px; }
+    .details-sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+    .details-table-wrap { overflow: auto; border: 1px solid rgba(15,23,42,0.08); border-radius: 12px; background: #fff; }
+    .details-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .details-table th, .details-table td { padding: 10px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid rgba(15,23,42,0.06); }
+    .details-table th { width: 28%; min-width: 180px; color: var(--muted); font-weight: 600; background: #fcfcfd; }
+    .details-table td { color: #111827; white-space: pre-wrap; word-break: break-word; }
+    .details-table tr:last-child th, .details-table tr:last-child td { border-bottom: 0; }
     .recs {
       margin-top: 26px;
       background: rgba(255,255,255,0.72);
@@ -820,9 +1150,25 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
     @media (max-width: 560px) {
       .recs-grid { grid-template-columns: 1fr; }
     }
+    @media (max-width: 760px) {
+      .topbar { border-radius: 18px; }
+    }
   </style>
 </head>
 <body>
+  <div class="page-shell">
+    <div class="topbar">
+      <a class="logo" href="/">dimi</a>
+      <form class="search-form" action="/search" method="get" role="search">
+        <input class="search-input" type="search" name="q" minlength="3" required placeholder="Search products, brands, categories" />
+        <button class="search-submit" type="submit">Search</button>
+      </form>
+      <div class="top-actions">
+        <a class="chip" href="/">Offers</a>
+        <a class="chip" href="#">Account</a>
+      </div>
+    </div>
+  </div>
   <div class="wrap">
     <div class="crumbs" id="product-crumbs">Loading product...</div>
     <div class="card">
@@ -843,18 +1189,34 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
         <a class="cta" href="#">Add to cart</a>
         <a class="cta-secondary" href="#">Wishlist</a>
         <div class="desc" id="product-desc" hidden></div>
-        <div class="meta" id="product-load-status">Rendering product details…</div>
+        <div class="rating-box" id="product-rating" hidden>
+          <div class="rating-label">Customer Rating</div>
+          <div class="rating-row">
+            <div class="rating-stars" id="product-rating-stars"></div>
+            <div class="rating-text" id="product-rating-text"></div>
+          </div>
+        </div>
+        <div class="meta" id="product-load-status">Loading product details from API…</div>
         <div class="specs">
           <div>Shipping: 2-4 days</div>
           <div>Returns: 30 days</div>
           <div>Support: Email & chat</div>
           <div>Secure checkout</div>
         </div>
+        <section class="details" id="product-details" hidden>
+          <h2>Additional details</h2>
+          <div class="details-sub">Non-standard product fields provided by this catalog entry.</div>
+          <div class="details-table-wrap">
+            <table class="details-table">
+              <tbody id="product-details-body"></tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </div>
     <section class="recs" id="similar-products">
       <h2>Products you may also like</h2>
-      <div class="recs-sub">Related suggestions selected on the server.</div>
+      <div class="recs-sub">Related suggestions loaded from the product API.</div>
       <div class="recs-status" id="similar-status">Loading suggestions...</div>
       <div class="recs-grid" id="similar-grid" hidden></div>
     </section>
@@ -862,8 +1224,7 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
   <script>
     (function () {
       var productId = {{ .id }};
-      var productData = {{ .product_data_json }};
-      var similarItems = {{ .similar_data_json }};
+      var productApiUrl = "/api/product/" + encodeURIComponent(productId);
       var statusEl = document.getElementById("similar-status");
       var gridEl = document.getElementById("similar-grid");
       var sectionEl = document.getElementById("similar-products");
@@ -876,6 +1237,11 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
       var catWrapEl = document.getElementById("product-category-wrap");
       var catEl = document.getElementById("product-category");
       var descEl = document.getElementById("product-desc");
+      var ratingBoxEl = document.getElementById("product-rating");
+      var ratingStarsEl = document.getElementById("product-rating-stars");
+      var ratingTextEl = document.getElementById("product-rating-text");
+      var detailsSectionEl = document.getElementById("product-details");
+      var detailsBodyEl = document.getElementById("product-details-body");
       var loadStatusEl = document.getElementById("product-load-status");
       if (!productId || !statusEl || !gridEl || !sectionEl) return;
 
@@ -933,6 +1299,88 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
         mediaEl.innerHTML = '<img src="' + escapeHtml(src) + '" alt="' + escapeHtml(name || "Product") + '" />';
       }
 
+      function parseNumber(v) {
+        if (typeof v === "number" && Number.isFinite(v)) return v;
+        if (typeof v === "string") {
+          var n = Number(v.trim());
+          if (Number.isFinite(n)) return n;
+        }
+        return null;
+      }
+
+      function renderRating(row) {
+        if (!ratingBoxEl || !ratingStarsEl || !ratingTextEl) return;
+        var rv = parseNumber(row.rating_value);
+        var rc = parseNumber(row.rating_count);
+        if (!(rv > 0) && !(rc > 0)) {
+          ratingBoxEl.hidden = true;
+          return;
+        }
+        var stars = "";
+        if (rv > 0) {
+          var rounded = Math.max(0, Math.min(5, rv));
+          var full = Math.round(rounded);
+          for (var i = 0; i < 5; i++) stars += i < full ? "★" : "☆";
+          ratingStarsEl.textContent = stars + " " + rounded.toFixed(1);
+          ratingTextEl.textContent = (rc > 0 ? (Math.round(rc) + " ratings") : "Customer reviews available");
+        } else {
+          ratingStarsEl.textContent = "";
+          ratingTextEl.textContent = Math.round(rc) + " ratings";
+        }
+        ratingBoxEl.hidden = false;
+      }
+
+      function formatFieldLabel(key) {
+        return String(key || "")
+          .replace(/^desc_/, "description_")
+          .replace(/_/g, " ")
+          .replace(/\b\w/g, function (ch) { return ch.toUpperCase(); });
+      }
+
+      function isMeaningfulValue(v) {
+        if (v === null || v === undefined) return false;
+        if (typeof v === "string") return v.trim() !== "";
+        return true;
+      }
+
+      function valueText(v) {
+        if (v === null || v === undefined) return "";
+        if (typeof v === "object") {
+          try { return JSON.stringify(v); } catch (_) { return String(v); }
+        }
+        return String(v);
+      }
+
+      function renderAdditionalDetails(row) {
+        if (!detailsSectionEl || !detailsBodyEl) return;
+        var excluded = {
+          gtin: true, dan: true,
+          name: true, title_headline: true,
+          brand: true, seo_brand: true,
+          price_raw: true, price_eur: true, metadata_price_eur: true, currency: true,
+          category_path: true, seo_category: true,
+          image: true, image_url: true, img: true, thumbnail: true,
+          desc_productbeschreibung: true, metadata_description: true,
+          rating_value: true, rating_count: true
+        };
+        var rows = [];
+        Object.keys(row || {}).sort().forEach(function (key) {
+          if (excluded[key]) return;
+          var val = row[key];
+          if (!isMeaningfulValue(val)) return;
+          rows.push(
+            "<tr><th>" + escapeHtml(formatFieldLabel(key)) + "</th><td>" + escapeHtml(valueText(val)) + "</td></tr>"
+          );
+        });
+        if (rows.length === 0) {
+          detailsBodyEl.innerHTML = "";
+          detailsSectionEl.hidden = true;
+          return;
+        }
+        detailsBodyEl.innerHTML = rows.join("");
+        detailsSectionEl.hidden = false;
+      }
+
       function hydrateProduct(row) {
         var name = firstNonEmpty(row.name, row.title_headline, "Product " + productId);
         var brand = firstNonEmpty(row.brand, row.seo_brand, "Unknown brand");
@@ -963,20 +1411,31 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
             descEl.hidden = true;
           }
         }
+        renderRating(row);
+        renderAdditionalDetails(row);
         if (loadStatusEl) {
-          loadStatusEl.textContent = "Rendered from server-provided product data.";
+          loadStatusEl.hidden = true;
         }
       }
 
       try {
+        var productData = {{ .product_data_json }};
         hydrateProduct(productData || {});
-      } catch (_) {
-        if (loadStatusEl) loadStatusEl.textContent = "Could not render product details.";
+      } catch (err) {
+        if (loadStatusEl) {
+          loadStatusEl.hidden = false;
+          loadStatusEl.textContent = "Could not render product details right now.";
+        }
+        if (crumbsEl) crumbsEl.textContent = "Product details";
+        if (brandEl) brandEl.textContent = "Unavailable";
+        if (nameEl) nameEl.textContent = "Product " + productId;
+        if (priceEl) priceEl.textContent = "Price not available";
+        if (mediaFallbackEl) mediaFallbackEl.textContent = "No image";
       }
 
       try {
-        var items = Array.isArray(similarItems) ? similarItems : [];
-        if (items.length === 0) {
+        var items = {{ .similar_data_json }};
+        if (!Array.isArray(items) || items.length === 0) {
           sectionEl.hidden = true;
           return;
         }
@@ -1043,6 +1502,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+      flex-wrap: wrap;
       padding: 10px 14px;
       border: 1px solid var(--line);
       background: rgba(255,255,255,0.7);
@@ -1060,6 +1520,40 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
       color: var(--brand);
     }
     .top-actions { display: flex; gap: 8px; }
+    .search-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 360px;
+      min-width: 240px;
+      max-width: 560px;
+      margin: 0 8px;
+    }
+    .search-input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.92);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 14px;
+      color: #0f172a;
+      outline: none;
+    }
+    .search-input:focus {
+      border-color: rgba(15, 118, 110, 0.4);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+    }
+    .search-submit {
+      border: 1px solid rgba(15, 118, 110, 0.20);
+      background: #0f766e;
+      color: #fff;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
     .chip {
       display: inline-flex;
       align-items: center;
@@ -1162,6 +1656,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
       margin-top: 26px;
       display: grid;
       gap: 18px;
+      scroll-margin-top: 84px;
     }
     .section {
       border: 1px solid var(--line);
@@ -1272,8 +1767,12 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
   <div class="shell">
     <div class="topbar">
       <div class="logo">dimi</div>
+      <form class="search-form" action="/search" method="get" role="search">
+        <input class="search-input" type="search" name="q" minlength="3" required placeholder="Search products, brands, categories" />
+        <button class="search-submit" type="submit">Search</button>
+      </form>
       <div class="top-actions">
-        <a class="chip" href="#">Offers</a>
+        <a class="chip" href="/">Offers</a>
         <a class="chip" href="#">Account</a>
       </div>
     </div>
@@ -1291,7 +1790,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
             <button class="btn btn-primary" id="scroll-sections" type="button">Browse Collections</button>
             <a class="btn btn-secondary" href="#">Shop New Arrivals</a>
           </div>
-          <div class="status" id="home-status">Loading homepage collections...</div>
+          <div class="status" id="home-status" hidden></div>
         </div>
         <aside class="hero-panel">
           <h2>Shop by what matters today</h2>
@@ -1324,12 +1823,36 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
   <script>
     (function () {
       var statusEl = document.getElementById("home-status");
+      var topbarEl = document.querySelector(".topbar");
       var sectionsEl = document.getElementById("sections");
       var scrollBtn = document.getElementById("scroll-sections");
 
       if (scrollBtn && sectionsEl) {
         scrollBtn.addEventListener("click", function () {
-          sectionsEl.scrollIntoView({ behavior: "smooth", block: "start" });
+          var targetEl = sectionsEl.querySelector(".section") || sectionsEl;
+          function desiredTopOffset() {
+            var topbarHeight = topbarEl ? topbarEl.getBoundingClientRect().height : 0;
+            var stickyTop = 0;
+            if (topbarEl && window.getComputedStyle) {
+              var topValue = window.getComputedStyle(topbarEl).top || "0";
+              var parsedTop = parseFloat(topValue);
+              if (Number.isFinite(parsedTop)) stickyTop = parsedTop;
+            }
+            return topbarHeight + stickyTop + 18;
+          }
+
+          var targetY = window.scrollY + targetEl.getBoundingClientRect().top - desiredTopOffset();
+          window.scrollTo({ top: Math.max(0, targetY), behavior: "smooth" });
+
+          // Post-scroll correction: measure actual overlap after sticky positioning settles.
+          window.setTimeout(function () {
+            var desiredTop = desiredTopOffset();
+            var actualTop = targetEl.getBoundingClientRect().top;
+            var delta = actualTop - desiredTop;
+            if (Math.abs(delta) > 2) {
+              window.scrollBy({ top: delta, behavior: "auto" });
+            }
+          }, 420);
         });
       }
 
@@ -1401,17 +1924,371 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
           '</section>';
       }
 
-      var data = {{ .home_data_json }};
-      var sections = Array.isArray(data && data.sections) ? data.sections : [];
-      if (sections.length === 0) {
-        statusEl.textContent = "No homepage collections available right now.";
+      try {
+        var data = {{ .home_data_json }};
+        var sections = Array.isArray(data.sections) ? data.sections : [];
+        if (sections.length === 0) {
+          statusEl.hidden = false;
+          statusEl.textContent = "No homepage collections available right now.";
+          return;
+        }
+        sectionsEl.innerHTML = sections.map(renderSection).join("");
+        statusEl.hidden = true;
+      } catch (_) {
+        statusEl.hidden = false;
+        statusEl.textContent = "Could not load homepage collections right now.";
+      }
+    })();
+  </script>
+</body>
+</html>`))
+
+var searchPageTemplate = template.Must(template.New("search").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .title }}</title>
+  <style>
+    :root {
+      --bg: #f3f0e7;
+      --ink: #0f172a;
+      --muted: #667085;
+      --line: rgba(15, 23, 42, 0.12);
+      --card: rgba(255,255,255,0.88);
+      --brand: #0f766e;
+      --shadow: 0 14px 32px rgba(15, 23, 42, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Georgia", "Times New Roman", serif;
+      background:
+        radial-gradient(900px 500px at 8% -5%, rgba(245, 158, 11, 0.14), transparent 60%),
+        radial-gradient(900px 500px at 95% 0%, rgba(16, 185, 129, 0.12), transparent 60%),
+        linear-gradient(180deg, #f7f4ec 0%, #f3f0e7 45%, #efede6 100%);
+    }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 20px 20px 56px; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 10px 14px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.72);
+      border-radius: 999px;
+      backdrop-filter: blur(6px);
+      position: sticky;
+      top: 10px;
+      z-index: 10;
+    }
+    .logo {
+      font-size: 14px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--brand);
+      text-decoration: none;
+    }
+    .search-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 460px;
+      min-width: 240px;
+      max-width: 700px;
+      margin: 0 8px;
+    }
+    .search-input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.95);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 14px;
+      outline: none;
+    }
+    .search-input:focus {
+      border-color: rgba(15, 118, 110, 0.4);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+    }
+    .search-submit {
+      border: 1px solid rgba(15, 118, 110, 0.20);
+      background: #0f766e;
+      color: #fff;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.85);
+      font-size: 13px;
+      text-decoration: none;
+      color: #1f2937;
+    }
+    .top-actions { display: flex; gap: 8px; }
+    .panel {
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel-head {
+      padding: 18px 18px 10px;
+      border-bottom: 1px solid rgba(15,23,42,0.06);
+    }
+    .panel-head h1 { margin: 0; font-size: 22px; }
+    .panel-sub { margin-top: 6px; color: var(--muted); font-size: 14px; }
+    .status {
+      margin: 12px 18px 0;
+      border: 1px dashed rgba(15, 23, 42, 0.16);
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(255,255,255,0.55);
+      color: #475569;
+      font-size: 14px;
+    }
+    .results {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding: 18px;
+    }
+    .result-card {
+      display: block;
+      text-decoration: none;
+      color: inherit;
+      border: 1px solid rgba(15, 23, 42, 0.10);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.92));
+      padding: 14px;
+      transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+    }
+    .result-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(15, 23, 42, 0.18);
+      box-shadow: 0 12px 22px rgba(15, 23, 42, 0.07);
+    }
+    .result-brand {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--brand);
+      margin-bottom: 8px;
+    }
+    .result-name {
+      font-size: 15px;
+      line-height: 1.35;
+      margin-bottom: 8px;
+    }
+    .result-category {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+    .result-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .result-price { color: var(--ink); font-weight: 700; font-size: 13px; }
+    .pager {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 0 18px 18px;
+    }
+    .pager-info { color: var(--muted); font-size: 13px; }
+    .pager-actions { display: flex; gap: 8px; }
+    .pager-btn {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.9);
+      color: #0f172a;
+      border-radius: 999px;
+      padding: 9px 12px;
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .pager-btn[aria-disabled="true"] {
+      pointer-events: none;
+      opacity: 0.45;
+    }
+    @media (max-width: 760px) {
+      .topbar { border-radius: 18px; }
+      .results { grid-template-columns: 1fr; }
+      .pager { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <a class="logo" href="/">dimi</a>
+      <form class="search-form" action="/search" method="get" role="search">
+        <input id="search-input" class="search-input" type="search" name="q" minlength="3" required placeholder="Search products, brands, categories" />
+        <button class="search-submit" type="submit">Search</button>
+      </form>
+      <div class="top-actions">
+        <a class="chip" href="/">Offers</a>
+        <a class="chip" href="#">Account</a>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1 id="search-title">Search results</h1>
+        <div class="panel-sub" id="search-sub">Enter a search to browse products.</div>
+      </div>
+      <div class="status" id="search-status">Loading search results...</div>
+      <div class="results" id="search-results" hidden></div>
+      <div class="pager" id="search-pager" hidden>
+        <div class="pager-info" id="search-pager-info"></div>
+        <div class="pager-actions">
+          <a class="pager-btn" id="prev-page" href="#" aria-disabled="true">Previous</a>
+          <a class="pager-btn" id="next-page" href="#" aria-disabled="true">Next</a>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var query = (params.get("q") || "").trim();
+      var pageRaw = params.get("page") || "1";
+      var page = parseInt(pageRaw, 10);
+      if (!Number.isFinite(page) || page < 1) page = 1;
+
+      var inputEl = document.getElementById("search-input");
+      var titleEl = document.getElementById("search-title");
+      var subEl = document.getElementById("search-sub");
+      var statusEl = document.getElementById("search-status");
+      var resultsEl = document.getElementById("search-results");
+      var pagerEl = document.getElementById("search-pager");
+      var pagerInfoEl = document.getElementById("search-pager-info");
+      var prevEl = document.getElementById("prev-page");
+      var nextEl = document.getElementById("next-page");
+
+      if (inputEl) inputEl.value = query;
+
+      function escapeHtml(s) {
+        return String(s == null ? "" : s).replace(/[&<>\"']/g, function (ch) {
+          return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[ch];
+        });
+      }
+
+      function formatPrice(item) {
+        if (typeof item.price_eur !== "number" || Number.isNaN(item.price_eur)) return "Price unavailable";
+        try {
+          return new Intl.NumberFormat("de-DE", {
+            style: "currency",
+            currency: item.currency || "EUR",
+            minimumFractionDigits: 2
+          }).format(item.price_eur);
+        } catch (_) {
+          return item.price_eur.toFixed(2) + " " + (item.currency || "EUR");
+        }
+      }
+
+      function ratingText(item) {
+        if (typeof item.rating_value === "number" && item.rating_value > 0) {
+          var t = "★ " + item.rating_value.toFixed(1);
+          if (typeof item.rating_count === "number" && item.rating_count > 0) t += " (" + item.rating_count + ")";
+          return t;
+        }
+        if (typeof item.rating_count === "number" && item.rating_count > 0) return item.rating_count + " reviews";
+        return "New";
+      }
+
+      function renderCard(item) {
+        var href = item.product_path || ("/product/" + encodeURIComponent(item.gtin || item.id || ""));
+        return '' +
+          '<a class="result-card" href="' + escapeHtml(href) + '">' +
+            '<div class="result-brand">' + escapeHtml(item.brand || "Unknown brand") + '</div>' +
+            '<div class="result-name">' + escapeHtml(item.name || "Product") + '</div>' +
+            '<div class="result-category">' + escapeHtml(item.category_path || "") + '</div>' +
+            '<div class="result-meta">' +
+              '<span class="result-price">' + escapeHtml(formatPrice(item)) + '</span>' +
+              '<span>' + escapeHtml(ratingText(item)) + '</span>' +
+            '</div>' +
+          '</a>';
+      }
+
+      function pageHref(targetPage) {
+        var p = new URLSearchParams(window.location.search);
+        p.set("q", query);
+        p.set("page", String(targetPage));
+        return "/search?" + p.toString();
+      }
+
+      if (!query) {
+        statusEl.textContent = "Enter at least 3 characters to search.";
         return;
       }
-      sectionsEl.innerHTML = sections.map(renderSection).join("");
-      statusEl.textContent = "Collections rendered.";
-      setTimeout(function () {
-        if (statusEl) statusEl.hidden = true;
-      }, 1200);
+
+      titleEl.textContent = 'Search results for "' + query + '"';
+      subEl.textContent = "Searching product names, brands, and categories.";
+
+      try {
+        var inlineError = {{ if .search_error }}{{ printf "%q" .search_error }}{{ else }}""{{ end }};
+        if (inlineError) throw new Error(inlineError);
+        var data = {{ .search_data_json }};
+        var items = Array.isArray(data && data.items) ? data.items : [];
+        if (items.length > 0) {
+          resultsEl.innerHTML = items.map(renderCard).join("");
+          resultsEl.hidden = false;
+        } else {
+          resultsEl.innerHTML = "";
+          resultsEl.hidden = true;
+        }
+
+        statusEl.textContent = items.length > 0
+          ? ("Showing " + data.returned + " of " + data.total + " results.")
+          : "No products found for this search.";
+
+        var maxPage = (typeof data.max_page === "number") ? data.max_page : (data.total_pages || 0);
+        var minPage = (typeof data.min_page === "number") ? data.min_page : 1;
+        var currentPage = (typeof data.page === "number") ? data.page : page;
+        pagerInfoEl.textContent = maxPage > 0
+          ? ("Page " + currentPage + " of " + maxPage)
+          : "No pages";
+        pagerEl.hidden = false;
+
+        if (currentPage > minPage) {
+          prevEl.href = pageHref(currentPage - 1);
+          prevEl.setAttribute("aria-disabled", "false");
+        } else {
+          prevEl.href = "#";
+          prevEl.setAttribute("aria-disabled", "true");
+        }
+        if (maxPage > 0 && currentPage < maxPage) {
+          nextEl.href = pageHref(currentPage + 1);
+          nextEl.setAttribute("aria-disabled", "false");
+        } else {
+          nextEl.href = "#";
+          nextEl.setAttribute("aria-disabled", "true");
+        }
+      } catch (err) {
+        statusEl.textContent = (err && err.message) ? err.message : "Could not load search results right now.";
+        resultsEl.hidden = true;
+        pagerEl.hidden = true;
+      }
     })();
   </script>
 </body>

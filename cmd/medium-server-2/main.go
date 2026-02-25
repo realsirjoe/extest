@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,8 @@ import (
 const defaultAddr = "127.0.0.1:18745"
 const sitemapProtocolMaxURLs = 50000
 const defaultSitemapChunkSize = 10000
+const searchMinChars = 3
+const searchPageSize = 10
 
 func main() {
 	flag.Usage = func() {
@@ -145,6 +148,57 @@ func main() {
 			log.Printf("template error: %v", err)
 		}
 	})
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search" {
+			http.NotFound(w, r)
+			return
+		}
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		page := 1
+		var payload *searchPayload
+		var searchErr string
+		if q != "" {
+			var ok bool
+			if len([]rune(q)) < searchMinChars {
+				searchErr = fmt.Sprintf("query must be at least %d characters", searchMinChars)
+			} else if page, ok = parsePageQueryParam(r, "page", 1); !ok {
+				searchErr = "invalid page"
+			} else {
+				offset, ok := pageOffset(page, searchPageSize)
+				if !ok {
+					searchErr = "page value is too large"
+				} else {
+					p, err := fetchSearchPayload(db, table, cols, *idCol, q, page, searchPageSize, offset)
+					if err != nil {
+						searchErr = "Could not load search results right now."
+						log.Printf("search error: %v", err)
+					} else {
+						payload = &p
+					}
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := searchPageTemplate.Execute(w, map[string]any{
+			"title":              "Search | dimi",
+			"query":              q,
+			"search_error":       searchErr,
+			"search_results":     renderSearchResultsHTML(payload),
+			"has_search_results": payload != nil && len(payload.Items) > 0,
+			"has_query":          strings.TrimSpace(q) != "",
+			"page":               page,
+			"total":              searchTotal(payload),
+			"returned":           searchReturned(payload),
+			"current_page":       searchCurrentPage(payload, page),
+			"max_page":           searchMaxPage(payload),
+			"prev_page":          searchPrevPage(payload),
+			"next_page":          searchNextPage(payload),
+			"has_prev":           searchHasPrev(payload),
+			"has_next":           searchHasNext(payload),
+		}); err != nil {
+			log.Printf("template error: %v", err)
+		}
+	})
 	mux.HandleFunc("/product/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/product/")
 		if id == "" || id == r.URL.Path {
@@ -181,6 +235,10 @@ func main() {
 			"category":     firstNonEmpty(getString(row, "category_path"), getString(row, "seo_category")),
 			"image":        firstNonEmpty(getString(row, "image"), getString(row, "image_url"), getString(row, "img"), getString(row, "thumbnail")),
 			"desc":         firstNonEmpty(getString(row, "desc_productbeschreibung"), getString(row, "metadata_description")),
+			"rating_html":  renderProductRatingHTML(row),
+			"has_rating":   hasProductRating(row),
+			"details_html": renderAdditionalDetailsTableRowsHTML(row),
+			"has_details":  hasAdditionalDetails(row),
 			"similar_html": renderSimilarCardsHTML(similar),
 			"has_similar":  len(similar) > 0,
 		}); err != nil {
@@ -505,6 +563,21 @@ type homeSection struct {
 	Items       []map[string]any `json:"items"`
 }
 
+type searchPayload struct {
+	Query          string           `json:"query"`
+	MinQueryLength int              `json:"min_query_length"`
+	Page           int              `json:"page"`
+	MinPage        int              `json:"min_page"`
+	MaxPage        int              `json:"max_page"`
+	PerPage        int              `json:"per_page"`
+	Offset         int              `json:"offset"`
+	Total          int              `json:"total"`
+	TotalPages     int              `json:"total_pages"`
+	Returned       int              `json:"returned"`
+	SearchFields   []string         `json:"search_fields"`
+	Items          []map[string]any `json:"items"`
+}
+
 func fetchHomePayload(db *sql.DB, table string) (homePayload, error) {
 	sections := []homeSection{}
 
@@ -576,6 +649,135 @@ func fetchHomePayload(db *sql.DB, table string) (homePayload, error) {
 		Table:       table,
 		Sections:    sections,
 	}, nil
+}
+
+func fetchSearchPayload(db *sql.DB, table string, cols []string, idCol, query string, page, perPage, offset int) (searchPayload, error) {
+	searchFields := make([]string, 0, 3)
+	for _, c := range []string{"name", "brand", "category_path"} {
+		if contains(cols, c) {
+			searchFields = append(searchFields, c)
+		}
+	}
+	if len(searchFields) == 0 {
+		return searchPayload{}, fmt.Errorf("no searchable columns available")
+	}
+
+	idSelectName := "gtin"
+	if !contains(cols, "gtin") {
+		idSelectName = idCol
+	}
+	if !contains(cols, idSelectName) {
+		return searchPayload{}, fmt.Errorf("id column %q not found for search result selection", idSelectName)
+	}
+
+	pattern := "%" + escapeLikePattern(query) + "%"
+	whereParts := make([]string, 0, len(searchFields))
+	whereArgs := make([]any, 0, len(searchFields))
+	for _, f := range searchFields {
+		whereParts = append(whereParts, fmt.Sprintf("%s LIKE ? ESCAPE '\\'", quoteIdent(f)))
+		whereArgs = append(whereArgs, pattern)
+	}
+	whereClause := strings.Join(whereParts, " OR ")
+	tableQ := quoteIdent(table)
+
+	countQ := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE (%s)", tableQ, whereClause)
+	var total int
+	if err := db.QueryRow(countQ, whereArgs...).Scan(&total); err != nil {
+		return searchPayload{}, err
+	}
+
+	items, err := fetchSearchItems(db, table, searchFields, idSelectName, perPage, offset, whereClause, whereArgs...)
+	if err != nil {
+		return searchPayload{}, err
+	}
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + perPage - 1) / perPage
+	}
+
+	return searchPayload{
+		Query:          query,
+		MinQueryLength: searchMinChars,
+		Page:           page,
+		MinPage:        1,
+		MaxPage:        totalPages,
+		PerPage:        perPage,
+		Offset:         offset,
+		Total:          total,
+		TotalPages:     totalPages,
+		Returned:       len(items),
+		SearchFields:   searchFields,
+		Items:          items,
+	}, nil
+}
+
+func fetchSearchItems(db *sql.DB, table string, searchFields []string, idCol string, limit, offset int, whereClause string, whereArgs ...any) ([]map[string]any, error) {
+	tableQ := quoteIdent(table)
+	idColQ := quoteIdent(idCol)
+	orderClauses := make([]string, 0, len(searchFields)+3)
+	for _, f := range searchFields {
+		fq := quoteIdent(f)
+		orderClauses = append(orderClauses, fmt.Sprintf("CASE WHEN %s LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END", fq))
+	}
+	orderClauses = append(orderClauses, "rating_count DESC", "rating_value DESC", quoteIdent("name")+" ASC")
+	orderClause := strings.Join(orderClauses, ", ")
+
+	args := make([]any, 0, len(whereArgs)+len(searchFields)+2)
+	args = append(args, whereArgs...)
+	if len(whereArgs) > 0 {
+		if substrPattern, ok := whereArgs[0].(string); ok {
+			prefix := prefixLikePatternFromSubstringPattern(substrPattern)
+			for range searchFields {
+				args = append(args, prefix)
+			}
+		}
+	}
+	args = append(args, limit, offset)
+
+	q := fmt.Sprintf(
+		`SELECT %s, name, brand, price_eur, currency, category_path, rating_value, rating_count
+		 FROM %s
+		 WHERE (%s)
+		 ORDER BY %s
+		 LIMIT ? OFFSET ?`,
+		idColQ, tableQ, whereClause, orderClause,
+	)
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var idVal, name, brand, currency, category sql.NullString
+		var price sql.NullFloat64
+		var ratingVal sql.NullFloat64
+		var ratingCount sql.NullInt64
+		if err := rows.Scan(&idVal, &name, &brand, &price, &currency, &category, &ratingVal, &ratingCount); err != nil {
+			return nil, err
+		}
+		id := idVal.String
+		item := map[string]any{
+			"id":            id,
+			"name":          name.String,
+			"brand":         brand.String,
+			"price_eur":     price.Float64,
+			"currency":      currency.String,
+			"category_path": category.String,
+			"rating_value":  ratingVal.Float64,
+			"rating_count":  ratingCount.Int64,
+			"product_path":  "/product/" + id,
+		}
+		if idCol == "gtin" {
+			item["gtin"] = id
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func fetchHomeSectionItems(db *sql.DB, table, where, order string, limit int, args ...any) ([]map[string]any, error) {
@@ -712,6 +914,217 @@ func renderSimilarCardsHTML(items []map[string]any) template.HTML {
 	return template.HTML(b.String())
 }
 
+func hasProductRating(row map[string]any) bool {
+	if rv, ok := getFloat(row, "rating_value"); ok && rv > 0 {
+		return true
+	}
+	if rc, ok := getInt(row, "rating_count"); ok && rc > 0 {
+		return true
+	}
+	return false
+}
+
+func renderProductRatingHTML(row map[string]any) template.HTML {
+	if !hasProductRating(row) {
+		return ""
+	}
+	var b strings.Builder
+	var rv float64
+	var hasRV bool
+	if v, ok := getFloat(row, "rating_value"); ok && v > 0 {
+		rv, hasRV = v, true
+	}
+	var rc int64
+	var hasRC bool
+	if v, ok := getInt(row, "rating_count"); ok && v > 0 {
+		rc, hasRC = v, true
+	}
+
+	if hasRV {
+		rounded := rv
+		if rounded < 0 {
+			rounded = 0
+		}
+		if rounded > 5 {
+			rounded = 5
+		}
+		full := int(rounded + 0.5)
+		stars := strings.Repeat("★", full) + strings.Repeat("☆", 5-full)
+		b.WriteString(`<div class="rating-stars">`)
+		b.WriteString(template.HTMLEscapeString(stars))
+		b.WriteString(` `)
+		b.WriteString(template.HTMLEscapeString(fmt.Sprintf("%.1f", rounded)))
+		b.WriteString(`</div>`)
+		if hasRC {
+			b.WriteString(`<div class="rating-text">`)
+			b.WriteString(template.HTMLEscapeString(fmt.Sprintf("%d ratings", rc)))
+			b.WriteString(`</div>`)
+		} else {
+			b.WriteString(`<div class="rating-text">Customer reviews available</div>`)
+		}
+	} else if hasRC {
+		b.WriteString(`<div class="rating-text">`)
+		b.WriteString(template.HTMLEscapeString(fmt.Sprintf("%d ratings", rc)))
+		b.WriteString(`</div>`)
+	}
+	return template.HTML(b.String())
+}
+
+func isAdditionalDetailField(key string) bool {
+	switch key {
+	case "gtin", "dan",
+		"name", "title_headline",
+		"brand", "seo_brand",
+		"price_raw", "price_eur", "metadata_price_eur", "currency",
+		"category_path", "seo_category",
+		"image", "image_url", "img", "thumbnail",
+		"desc_productbeschreibung", "metadata_description",
+		"rating_value", "rating_count":
+		return false
+	default:
+		return true
+	}
+}
+
+func hasAdditionalDetails(row map[string]any) bool {
+	for k, v := range row {
+		if !isAdditionalDetailField(k) {
+			continue
+		}
+		if strings.TrimSpace(getString(map[string]any{"v": v}, "v")) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func renderAdditionalDetailsTableRowsHTML(row map[string]any) template.HTML {
+	keys := make([]string, 0, len(row))
+	for k, v := range row {
+		if !isAdditionalDetailField(k) {
+			continue
+		}
+		if strings.TrimSpace(getString(map[string]any{"v": v}, "v")) == "" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		v := row[k]
+		b.WriteString(`<tr><th>`)
+		b.WriteString(template.HTMLEscapeString(formatFieldLabel(k)))
+		b.WriteString(`</th><td>`)
+		b.WriteString(template.HTMLEscapeString(formatDetailValue(v)))
+		b.WriteString(`</td></tr>`)
+	}
+	return template.HTML(b.String())
+}
+
+func formatFieldLabel(key string) string {
+	s := key
+	if strings.HasPrefix(s, "desc_") {
+		s = "description_" + strings.TrimPrefix(s, "desc_")
+	}
+	s = strings.ReplaceAll(s, "_", " ")
+	parts := strings.Fields(s)
+	for i, p := range parts {
+		if len(p) == 0 {
+			continue
+		}
+		parts[i] = strings.ToUpper(p[:1]) + p[1:]
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatDetailValue(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case []byte:
+		return string(t)
+	default:
+		return fmt.Sprint(t)
+	}
+}
+
+func renderSearchResultsHTML(payload *searchPayload) template.HTML {
+	if payload == nil || len(payload.Items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range payload.Items {
+		b.WriteString(renderSearchResultCardHTML(item))
+	}
+	return template.HTML(b.String())
+}
+
+func renderSearchResultCardHTML(item map[string]any) string {
+	href := firstNonEmpty(getString(item, "product_path"), "/product/"+firstNonEmpty(getString(item, "gtin"), getString(item, "id")))
+	brand := firstNonEmpty(getString(item, "brand"), "Unknown brand")
+	name := firstNonEmpty(getString(item, "name"), "Product")
+	category := getString(item, "category_path")
+	price := formatCurrencyFromMap(item)
+	rating := formatRatingSummary(item)
+	var b strings.Builder
+	b.WriteString(`<a class="result-card" href="`)
+	b.WriteString(template.HTMLEscapeString(href))
+	b.WriteString(`"><div class="result-brand">`)
+	b.WriteString(template.HTMLEscapeString(brand))
+	b.WriteString(`</div><div class="result-name">`)
+	b.WriteString(template.HTMLEscapeString(name))
+	b.WriteString(`</div><div class="result-category">`)
+	b.WriteString(template.HTMLEscapeString(category))
+	b.WriteString(`</div><div class="result-meta"><span class="result-price">`)
+	b.WriteString(template.HTMLEscapeString(price))
+	b.WriteString(`</span><span>`)
+	b.WriteString(template.HTMLEscapeString(rating))
+	b.WriteString(`</span></div></a>`)
+	return b.String()
+}
+
+func searchTotal(p *searchPayload) int {
+	if p == nil {
+		return 0
+	}
+	return p.Total
+}
+func searchReturned(p *searchPayload) int {
+	if p == nil {
+		return 0
+	}
+	return p.Returned
+}
+func searchCurrentPage(p *searchPayload, fallback int) int {
+	if p == nil {
+		return fallback
+	}
+	return p.Page
+}
+func searchMaxPage(p *searchPayload) int {
+	if p == nil {
+		return 0
+	}
+	return p.MaxPage
+}
+func searchHasPrev(p *searchPayload) bool { return p != nil && p.Page > p.MinPage }
+func searchHasNext(p *searchPayload) bool { return p != nil && p.MaxPage > 0 && p.Page < p.MaxPage }
+func searchPrevPage(p *searchPayload) int {
+	if !searchHasPrev(p) {
+		return 1
+	}
+	return p.Page - 1
+}
+func searchNextPage(p *searchPayload) int {
+	if !searchHasNext(p) {
+		return 1
+	}
+	return p.Page + 1
+}
+
 func formatCurrencyFromMap(item map[string]any) string {
 	if price, ok := getFloat(item, "price_eur"); ok {
 		currency := firstNonEmpty(getString(item, "currency"), "EUR")
@@ -719,6 +1132,42 @@ func formatCurrencyFromMap(item map[string]any) string {
 	}
 	return "Price unavailable"
 }
+
+func escapeLikePattern(s string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(s)
+}
+
+func prefixLikePatternFromSubstringPattern(substrPattern string) string {
+	trimmed := strings.TrimPrefix(strings.TrimSuffix(substrPattern, "%"), "%")
+	return trimmed + "%"
+}
+
+func parsePageQueryParam(r *http.Request, key string, fallback int) (int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return fallback, true
+	}
+	n64, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n64 < 1 || n64 > maxIntValue() {
+		return 0, false
+	}
+	return int(n64), true
+}
+
+func pageOffset(page, perPage int) (int, bool) {
+	if page < 1 || perPage < 1 {
+		return 0, false
+	}
+	p := int64(page - 1)
+	sz := int64(perPage)
+	if p > maxIntValue()/sz {
+		return 0, false
+	}
+	return int(p * sz), true
+}
+
+func maxIntValue() int64 { return int64(^uint(0) >> 1) }
 
 func formatRatingSummary(item map[string]any) string {
 	if rv, ok := getFloat(item, "rating_value"); ok && rv > 0 {
@@ -790,6 +1239,72 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
       color: var(--ink);
       font-family: "Georgia", "Times New Roman", serif;
     }
+    .page-shell { max-width: 1180px; margin: 0 auto; padding: 20px 20px 0; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 10px 14px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: rgba(255,255,255,0.72);
+      border-radius: 999px;
+      backdrop-filter: blur(6px);
+      position: sticky;
+      top: 10px;
+      z-index: 10;
+    }
+    .logo {
+      font-size: 14px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .search-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 460px;
+      min-width: 240px;
+      max-width: 700px;
+      margin: 0 8px;
+    }
+    .search-input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: rgba(255,255,255,0.95);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 14px;
+      outline: none;
+      color: #0f172a;
+    }
+    .search-submit {
+      border: 1px solid rgba(15, 118, 110, 0.20);
+      background: #0f766e;
+      color: #fff;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .top-actions { display: flex; gap: 8px; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.85);
+      font-size: 13px;
+      text-decoration: none;
+      color: #1f2937;
+    }
     .wrap { max-width: 1040px; margin: 40px auto 64px; padding: 0 20px; }
     .crumbs { font-size: 14px; color: var(--muted); margin-bottom: 14px; text-transform: capitalize; }
     .card {
@@ -846,8 +1361,22 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
       margin-left: 8px;
     }
     .desc { margin-top: 18px; line-height: 1.7; font-size: 16px; color: #1f2937; max-width: 60ch; }
+    .rating-box { margin-top: 16px; border: 1px solid var(--border); border-radius: 14px; background: #f8fafc; padding: 12px 14px; }
+    .rating-label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+    .rating-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .rating-stars { color: #f59e0b; letter-spacing: 1px; font-size: 16px; }
+    .rating-text { color: #334155; font-size: 14px; }
     .specs { margin-top: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; font-size: 14px; color: var(--muted); }
     .specs div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .details { margin-top: 18px; }
+    .details h2 { margin: 0 0 6px; font-size: 18px; }
+    .details-sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+    .details-table-wrap { overflow: auto; border: 1px solid rgba(15,23,42,0.08); border-radius: 12px; background: #fff; }
+    .details-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .details-table th, .details-table td { padding: 10px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid rgba(15,23,42,0.06); }
+    .details-table th { width: 28%; min-width: 180px; color: var(--muted); font-weight: 600; background: #fcfcfd; }
+    .details-table td { color: #111827; white-space: pre-wrap; word-break: break-word; }
+    .details-table tr:last-child th, .details-table tr:last-child td { border-bottom: 0; }
     .recs {
       margin-top: 26px;
       background: rgba(255,255,255,0.72);
@@ -920,9 +1449,25 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
     @media (max-width: 560px) {
       .recs-grid { grid-template-columns: 1fr; }
     }
+    @media (max-width: 760px) {
+      .topbar { border-radius: 18px; }
+    }
   </style>
 </head>
 <body>
+  <div class="page-shell">
+    <div class="topbar">
+      <a class="logo" href="/">dimi</a>
+      <form class="search-form" action="/search" method="get" role="search">
+        <input class="search-input" type="search" name="q" minlength="3" required placeholder="Search products, brands, categories" />
+        <button class="search-submit" type="submit">Search</button>
+      </form>
+      <div class="top-actions">
+        <a class="chip" href="/">Offers</a>
+        <a class="chip" href="#">Account</a>
+      </div>
+    </div>
+  </div>
   <div class="wrap">
     <div class="crumbs">{{ if .category }}{{ .category }}{{ else }}Product details{{ end }}</div>
     <div class="card">
@@ -947,13 +1492,27 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
         <a class="cta" href="#">Add to cart</a>
         <a class="cta-secondary" href="#">Wishlist</a>
         {{ if .desc }}<div class="desc">{{ .desc }}</div>{{ end }}
-        <div class="meta">Rendered on the server.</div>
+        {{ if .has_rating }}
+        <div class="rating-box">
+          <div class="rating-label">Customer Rating</div>
+          <div class="rating-row">{{ .rating_html }}</div>
+        </div>
+        {{ end }}
         <div class="specs">
           <div>Shipping: 2-4 days</div>
           <div>Returns: 30 days</div>
           <div>Support: Email & chat</div>
           <div>Secure checkout</div>
         </div>
+        {{ if .has_details }}
+        <section class="details">
+          <h2>Additional details</h2>
+          <div class="details-sub">Non-standard product fields provided by this catalog entry.</div>
+          <div class="details-table-wrap">
+            <table class="details-table"><tbody>{{ .details_html }}</tbody></table>
+          </div>
+        </section>
+        {{ end }}
       </div>
     </div>
     <section class="recs" id="similar-products">
@@ -1004,6 +1563,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+      flex-wrap: wrap;
       padding: 10px 14px;
       border: 1px solid var(--line);
       background: rgba(255,255,255,0.7);
@@ -1019,6 +1579,40 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
       text-transform: uppercase;
       font-weight: 700;
       color: var(--brand);
+    }
+    .search-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 360px;
+      min-width: 240px;
+      max-width: 560px;
+      margin: 0 8px;
+    }
+    .search-input {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.92);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 14px;
+      color: #0f172a;
+      outline: none;
+    }
+    .search-input:focus {
+      border-color: rgba(15, 118, 110, 0.4);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+    }
+    .search-submit {
+      border: 1px solid rgba(15, 118, 110, 0.20);
+      background: #0f766e;
+      color: #fff;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
     }
     .top-actions { display: flex; gap: 8px; }
     .chip {
@@ -1123,6 +1717,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
       margin-top: 26px;
       display: grid;
       gap: 18px;
+      scroll-margin-top: 84px;
     }
     .section {
       border: 1px solid var(--line);
@@ -1233,8 +1828,12 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
   <div class="shell">
     <div class="topbar">
       <div class="logo">dimi</div>
+      <form class="search-form" action="/search" method="get" role="search">
+        <input class="search-input" type="search" name="q" minlength="3" required placeholder="Search products, brands, categories" />
+        <button class="search-submit" type="submit">Search</button>
+      </form>
       <div class="top-actions">
-        <a class="chip" href="#">Offers</a>
+        <a class="chip" href="/">Offers</a>
         <a class="chip" href="#">Account</a>
       </div>
     </div>
@@ -1252,7 +1851,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
             <button class="btn btn-primary" id="scroll-sections" type="button">Browse Collections</button>
             <a class="btn btn-secondary" href="#">Shop New Arrivals</a>
           </div>
-          <div class="status" id="home-status">Collections ready.</div>
+          <div class="status" id="home-status" hidden></div>
         </div>
         <aside class="hero-panel">
           <h2>Shop by what matters today</h2>
@@ -1285,20 +1884,112 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
   <script>
     (function () {
       var statusEl = document.getElementById("home-status");
+      var topbarEl = document.querySelector(".topbar");
       var sectionsEl = document.getElementById("sections");
       var scrollBtn = document.getElementById("scroll-sections");
 
       if (scrollBtn && sectionsEl) {
         scrollBtn.addEventListener("click", function () {
-          sectionsEl.scrollIntoView({ behavior: "smooth", block: "start" });
+          var targetEl = sectionsEl.querySelector(".section") || sectionsEl;
+          function desiredTopOffset() {
+            var topbarHeight = topbarEl ? topbarEl.getBoundingClientRect().height : 0;
+            var stickyTop = 0;
+            if (topbarEl && window.getComputedStyle) {
+              var topValue = window.getComputedStyle(topbarEl).top || "0";
+              var parsedTop = parseFloat(topValue);
+              if (Number.isFinite(parsedTop)) stickyTop = parsedTop;
+            }
+            return topbarHeight + stickyTop + 18;
+          }
+          var targetY = window.scrollY + targetEl.getBoundingClientRect().top - desiredTopOffset();
+          window.scrollTo({ top: Math.max(0, targetY), behavior: "smooth" });
+          window.setTimeout(function () {
+            var desiredTop = desiredTopOffset();
+            var actualTop = targetEl.getBoundingClientRect().top;
+            var delta = actualTop - desiredTop;
+            if (Math.abs(delta) > 2) {
+              window.scrollBy({ top: delta, behavior: "auto" });
+            }
+          }, 420);
         });
       }
 
-      setTimeout(function () {
-        if (statusEl) statusEl.hidden = true;
-      }, 1200);
+      if (statusEl) statusEl.hidden = true;
     })();
   </script>
+</body>
+</html>`))
+
+var searchPageTemplate = template.Must(template.New("search").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ .title }}</title>
+  <style>
+    :root { --bg:#f3f0e7; --ink:#0f172a; --muted:#667085; --line:rgba(15,23,42,.12); --card:rgba(255,255,255,.88); --brand:#0f766e; --shadow:0 14px 32px rgba(15,23,42,.08);}
+    * { box-sizing: border-box; }
+    body { margin:0; color:var(--ink); font-family:"Georgia","Times New Roman",serif; background:radial-gradient(900px 500px at 8% -5%, rgba(245,158,11,.14), transparent 60%), radial-gradient(900px 500px at 95% 0%, rgba(16,185,129,.12), transparent 60%), linear-gradient(180deg, #f7f4ec 0%, #f3f0e7 45%, #efede6 100%); }
+    .shell { max-width:1180px; margin:0 auto; padding:20px 20px 56px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:10px 14px; border:1px solid var(--line); background:rgba(255,255,255,.72); border-radius:999px; backdrop-filter:blur(6px); position:sticky; top:10px; z-index:10; }
+    .logo { font-size:14px; letter-spacing:.16em; text-transform:uppercase; font-weight:700; color:var(--brand); text-decoration:none; }
+    .search-form { display:flex; align-items:center; gap:8px; flex:1 1 460px; min-width:240px; max-width:700px; margin:0 8px; }
+    .search-input { flex:1; min-width:0; border:1px solid var(--line); background:rgba(255,255,255,.95); border-radius:999px; padding:10px 14px; font-size:14px; outline:none; }
+    .search-submit { border:1px solid rgba(15,118,110,.2); background:#0f766e; color:#fff; border-radius:999px; padding:10px 14px; font-size:13px; cursor:pointer; white-space:nowrap; }
+    .chip { display:inline-flex; align-items:center; padding:8px 12px; border:1px solid var(--line); border-radius:999px; background:rgba(255,255,255,.85); font-size:13px; text-decoration:none; color:#1f2937; }
+    .top-actions { display:flex; gap:8px; }
+    .panel { margin-top:18px; border:1px solid var(--line); border-radius:20px; background:var(--card); box-shadow:var(--shadow); overflow:hidden; }
+    .panel-head { padding:18px 18px 10px; border-bottom:1px solid rgba(15,23,42,.06); }
+    .panel-head h1 { margin:0; font-size:22px; }
+    .panel-sub { margin-top:6px; color:var(--muted); font-size:14px; }
+    .status { margin:12px 18px 0; border:1px dashed rgba(15,23,42,.16); border-radius:14px; padding:12px; background:rgba(255,255,255,.55); color:#475569; font-size:14px; }
+    .results { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; padding:18px; }
+    .result-card { display:block; text-decoration:none; color:inherit; border:1px solid rgba(15,23,42,.10); border-radius:16px; background:linear-gradient(180deg, rgba(255,255,255,.96), rgba(248,250,252,.92)); padding:14px; }
+    .result-brand { font-size:11px; text-transform:uppercase; letter-spacing:.14em; color:var(--brand); margin-bottom:8px; }
+    .result-name { font-size:15px; line-height:1.35; margin-bottom:8px; }
+    .result-category { color:var(--muted); font-size:12px; margin-bottom:10px; }
+    .result-meta { display:flex; justify-content:space-between; gap:10px; font-size:12px; color:var(--muted); }
+    .result-price { color:var(--ink); font-weight:700; font-size:13px; }
+    .pager { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:0 18px 18px; }
+    .pager-info { color:var(--muted); font-size:13px; }
+    .pager-actions { display:flex; gap:8px; }
+    .pager-btn { border:1px solid var(--line); background:rgba(255,255,255,.9); color:#0f172a; border-radius:999px; padding:9px 12px; text-decoration:none; font-size:13px; }
+    .pager-btn.disabled { pointer-events:none; opacity:.45; }
+    @media (max-width:760px){ .topbar{border-radius:18px;} .results{grid-template-columns:1fr;} .pager{flex-direction:column; align-items:flex-start;} }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <a class="logo" href="/">dimi</a>
+      <form class="search-form" action="/search" method="get" role="search">
+        <input class="search-input" type="search" name="q" minlength="3" required placeholder="Search products, brands, categories" value="{{ .query }}" />
+        <button class="search-submit" type="submit">Search</button>
+      </form>
+      <div class="top-actions">
+        <a class="chip" href="/">Offers</a>
+        <a class="chip" href="#">Account</a>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>{{ if .has_query }}Search results for "{{ .query }}"{{ else }}Search results{{ end }}</h1>
+        <div class="panel-sub">Searching product names, brands, and categories.</div>
+      </div>
+      <div class="status">{{ if .search_error }}{{ .search_error }}{{ else if not .has_query }}Enter at least 3 characters to search.{{ else if .has_search_results }}Showing {{ .returned }} of {{ .total }} results.{{ else }}No products found for this search.{{ end }}</div>
+      {{ if .has_search_results }}<div class="results">{{ .search_results }}</div>{{ end }}
+      {{ if .has_query }}
+      <div class="pager">
+        <div class="pager-info">{{ if gt .max_page 0 }}Page {{ .current_page }} of {{ .max_page }}{{ else }}No pages{{ end }}</div>
+        <div class="pager-actions">
+          <a class="pager-btn {{ if not .has_prev }}disabled{{ end }}" href="{{ if .has_prev }}/search?q={{ .query }}&page={{ .prev_page }}{{ else }}#{{ end }}">Previous</a>
+          <a class="pager-btn {{ if not .has_next }}disabled{{ end }}" href="{{ if .has_next }}/search?q={{ .query }}&page={{ .next_page }}{{ else }}#{{ end }}">Next</a>
+        </div>
+      </div>
+      {{ end }}
+    </section>
+  </div>
 </body>
 </html>`))
 
