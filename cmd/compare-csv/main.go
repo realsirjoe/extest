@@ -486,8 +486,11 @@ func findKeyMatch(ref, cand csvTable, refProfiles, candProfiles map[string]colPr
 			complete := len(ref.Rows) == len(cand.Rows) && len(candVals) == len(refVals) && setsEqual(refSet, candSet)
 			candCoverage := float64(intersection) / maxFloat(float64(len(candSet)), 1)
 			refCoverage := float64(intersection) / maxFloat(float64(len(refSet)), 1)
+			refSupport := safeDiv(float64(len(refSet)), float64(len(ref.Rows)))
+			candSupport := safeDiv(float64(len(candSet)), float64(len(cand.Rows)))
+			supportScore := minFloat(refSupport, candSupport)
 			hScore := headerSimilarity(refCol, candCol)
-			keyScore := ternaryFloat(complete, 10.0, 0.0) + (candCoverage * 2.0) + refCoverage + hScore
+			keyScore := ternaryFloat(complete, 10.0, 0.0) + (candCoverage * 2.0) + refCoverage + hScore + (supportScore * 3.0)
 			candidates = append(candidates, keyCandidate{
 				ReferenceColumn:      refCol,
 				CandidateColumn:      candCol,
@@ -1058,6 +1061,13 @@ func safeDiv(a, b float64) float64 {
 
 func maxFloat(a, b float64) float64 {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
 		return a
 	}
 	return b

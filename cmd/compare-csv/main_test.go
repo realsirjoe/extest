@@ -100,6 +100,53 @@ func TestCompareCSV_Candidate3SubsetHasPerfectSimilarityButLowerCoverage(t *test
 	}
 }
 
+func TestCompareCSV_MissingSingleRowDropsCoverageBelowOne(t *testing.T) {
+	tmpDir := t.TempDir()
+	candidate499 := filepath.Join(tmpDir, "candidate_499.csv")
+	baseRows, err := readCSVRows(testdataPath("sample_products_candidate1_500.csv"))
+	if err != nil {
+		t.Fatalf("readCSVRows error: %v", err)
+	}
+	rowIdx := firstRowIndexWithNonEmptyColumn(baseRows.Header, baseRows.Records, "gtin_code")
+	if rowIdx < 0 {
+		t.Fatalf("no candidate row with non-empty gtin_code found")
+	}
+	if err := writeCSVWithoutRow(
+		testdataPath("sample_products_candidate1_500.csv"),
+		candidate499,
+		rowIdx,
+	); err != nil {
+		t.Fatalf("writeCSVWithoutRow error: %v", err)
+	}
+
+	report, err := compareCSVFiles(
+		testdataPath("sample_products_reference_500.csv"),
+		candidate499,
+		256,
+	)
+	if err != nil {
+		t.Fatalf("compareCSVFiles error: %v", err)
+	}
+	if report.Status != "partial_key_match" {
+		t.Fatalf("expected status partial_key_match, got %q", report.Status)
+	}
+	if !almostEqual(report.Scores.DatasetSimilarityEqualWeighted, 1.0) {
+		t.Fatalf("expected similarity 1.0 for remaining matched rows, got %.15f", report.Scores.DatasetSimilarityEqualWeighted)
+	}
+	if !almostEqual(report.RowAlignment.CoverageReference, 499.0/500.0) {
+		t.Fatalf("expected reference coverage 499/500, got %.15f", report.RowAlignment.CoverageReference)
+	}
+	if !almostEqual(report.RowAlignment.CoverageCandidate, 1.0) {
+		t.Fatalf("expected candidate coverage 1.0, got %.15f", report.RowAlignment.CoverageCandidate)
+	}
+	if !(report.Scores.OverallScoreWithCoverage < 1.0) {
+		t.Fatalf("expected overall score with coverage < 1.0, got %.15f", report.Scores.OverallScoreWithCoverage)
+	}
+	if !almostEqual(report.Scores.OverallScoreWithCoverage, 499.0/500.0) {
+		t.Fatalf("expected overall score with coverage 499/500, got %.15f", report.Scores.OverallScoreWithCoverage)
+	}
+}
+
 func TestCompareCSV_NoUsableKeyMatchWhenCandidateKeysRemoved(t *testing.T) {
 	tmpDir := t.TempDir()
 	candidateNoKeys := filepath.Join(tmpDir, "candidate_no_keys.csv")
@@ -579,6 +626,27 @@ func writeCSVWithDuplicateRow(src, dst string, rowIdx int) error {
 	dup := append([]string(nil), rows.Records[rowIdx]...)
 	rows.Records = append(rows.Records, dup)
 	return writeCSVRows(dst, rows)
+}
+
+func writeCSVWithoutRow(src, dst string, rowIdx int) error {
+	rows, err := readCSVRows(src)
+	if err != nil {
+		return err
+	}
+	if rowIdx < 0 || rowIdx >= len(rows.Records) {
+		return fmt.Errorf("rowIdx out of range: %d", rowIdx)
+	}
+	out := csvRows{
+		Header:  append([]string(nil), rows.Header...),
+		Records: make([][]string, 0, len(rows.Records)-1),
+	}
+	for i, rec := range rows.Records {
+		if i == rowIdx {
+			continue
+		}
+		out.Records = append(out.Records, append([]string(nil), rec...))
+	}
+	return writeCSVRows(dst, out)
 }
 
 func mustColumnIndex(header []string, col string) int {
