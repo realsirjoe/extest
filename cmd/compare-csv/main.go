@@ -150,8 +150,8 @@ var (
 )
 
 func main() {
-	reference := flag.String("reference", "outputs/dm_products_reference.csv", "Reference CSV (ground truth)")
-	candidate := flag.String("candidate", "outputs/dm_products_candidate1.csv", "Candidate CSV to evaluate")
+	reference := flag.String("reference", "outputs/sample_products_reference.csv", "Reference CSV (ground truth)")
+	candidate := flag.String("candidate", "outputs/sample_products_candidate1.csv", "Candidate CSV to evaluate")
 	outputJSON := flag.String("output-json", "", "Optional path to write JSON report")
 	sampleSizeMapping := flag.Int("sample-size-mapping", 256, "Aligned-row sample size used for column mapping confidence")
 	flag.Parse()

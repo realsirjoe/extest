@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	defaultInput  = "outputs/dm_products_reference.csv"
-	defaultOutput = "outputs/dm_products_candidate1.csv"
+	defaultInput  = "outputs/sample_products_reference.csv"
+	defaultOutput = "outputs/sample_products_candidate1.csv"
 	defaultSeed   = int64(20260224)
 )
 

@@ -6,8 +6,8 @@ Build an isolated module that compares an extracted dataset against a known refe
 
 Initial target:
 
-- Reference dataset: `outputs/dm_products_reference.csv`
-- Candidate dataset: `outputs/dm_products_candidate1.csv`
+- Reference dataset: `outputs/sample_products_reference.csv`
+- Candidate dataset: `outputs/sample_products_candidate1.csv`
 
 The module should be reusable for later extraction runs where:
 
@@ -303,8 +303,8 @@ Stretch goals (later):
 
 Comparing:
 
-- `outputs/dm_products_reference.csv`
-- `outputs/dm_products_candidate1.csv`
+- `outputs/sample_products_reference.csv`
+- `outputs/sample_products_candidate1.csv`
 
 Expected:
 

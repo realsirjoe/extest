@@ -4,13 +4,13 @@ These are the historical Python comparator outputs used as a translation baselin
 
 Reference file:
 
-- `outputs/dm_products_reference.csv`
+- `outputs/sample_products_reference.csv`
 
 Candidates tested:
 
 ## candidate1
 
-- Candidate: `outputs/dm_products_candidate1.csv`
+- Candidate: `outputs/sample_products_candidate1.csv`
 - Status: `ok`
 - Key match: `gtin -> gtin_code` (`complete`)
 - Dataset similarity (equal weighted): `1.0`
@@ -20,7 +20,7 @@ Candidates tested:
 
 ## candidate2
 
-- Candidate: `outputs/dm_products_candidate2.csv`
+- Candidate: `outputs/sample_products_candidate2.csv`
 - Status: `ok`
 - Key match: `gtin -> gtin_code` (`complete`)
 - Dataset similarity (equal weighted): `0.9999999837592288`
@@ -30,7 +30,7 @@ Candidates tested:
 
 ## candidate3
 
-- Candidate: `outputs/dm_products_candidate3.csv`
+- Candidate: `outputs/sample_products_candidate3.csv`
 - Status: `partial_key_match`
 - Key match: `gtin -> gtin_code` (`partial`)
 - Dataset similarity (equal weighted): `1.0`

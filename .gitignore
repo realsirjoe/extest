@@ -43,4 +43,7 @@ __pycache__/
 .env
 .env.*
 
+# Large local raw dataset
+/outputs/sample_products_all.jl
+
 outputs

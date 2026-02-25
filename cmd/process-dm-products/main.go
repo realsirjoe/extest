@@ -22,11 +22,11 @@ import (
 type Row map[string]any
 
 var (
-	inputPath  = flag.String("input", "dm_products_all.jl", "Input JSON Lines file")
+	inputPath  = flag.String("input", "outputs/sample_products_all.jl", "Input JSON Lines file")
 	outputDir  = flag.String("out-dir", "outputs", "Output directory")
-	csvPath    = flag.String("csv", "", "Reference CSV output path (default outputs/dm_products_reference.csv)")
-	sqlitePath = flag.String("sqlite", "", "SQLite output path (default outputs/dm_products_cleaned.sqlite)")
-	profilePath = flag.String("profile", "", "Profile markdown output path (default outputs/dm_products_profile.md)")
+	csvPath    = flag.String("csv", "", "Reference CSV output path (default outputs/sample_products_reference.csv)")
+	sqlitePath = flag.String("sqlite", "", "SQLite output path (default outputs/sample_products_cleaned.sqlite)")
+	profilePath = flag.String("profile", "", "Profile markdown output path (default outputs/sample_products_profile.md)")
 	limitRows   = flag.Int("limit", 0, "Optional limit for testing (0 = all rows)")
 )
 
@@ -73,13 +73,13 @@ func main() {
 	outSQLite := *sqlitePath
 	outProfile := *profilePath
 	if outCSV == "" {
-		outCSV = filepath.Join(*outputDir, "dm_products_reference.csv")
+		outCSV = filepath.Join(*outputDir, "sample_products_reference.csv")
 	}
 	if outSQLite == "" {
-		outSQLite = filepath.Join(*outputDir, "dm_products_cleaned.sqlite")
+		outSQLite = filepath.Join(*outputDir, "sample_products_cleaned.sqlite")
 	}
 	if outProfile == "" {
-		outProfile = filepath.Join(*outputDir, "dm_products_profile.md")
+		outProfile = filepath.Join(*outputDir, "sample_products_profile.md")
 	}
 
 	if err := os.MkdirAll(*outputDir, 0o755); err != nil {
@@ -423,10 +423,10 @@ func writeSQLite(path string, cols []string, rows []Row) error {
 		}
 		defs = append(defs, fmt.Sprintf("%q %s", c, t))
 	}
-	if _, err := db.Exec(`DROP TABLE IF EXISTS "dm_products_cleaned"`); err != nil {
+	if _, err := db.Exec(`DROP TABLE IF EXISTS "sample_products_cleaned"`); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`CREATE TABLE "dm_products_cleaned" (` + strings.Join(defs, ",") + `)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE "sample_products_cleaned" (` + strings.Join(defs, ",") + `)`); err != nil {
 		return err
 	}
 	ph := strings.TrimRight(strings.Repeat("?,", len(cols)), ",")
@@ -434,7 +434,7 @@ func writeSQLite(path string, cols []string, rows []Row) error {
 	for _, c := range cols {
 		qCols = append(qCols, fmt.Sprintf("%q", c))
 	}
-	stmt, err := db.Prepare(`INSERT INTO "dm_products_cleaned" (` + strings.Join(qCols, ",") + `) VALUES (` + ph + `)`)
+	stmt, err := db.Prepare(`INSERT INTO "sample_products_cleaned" (` + strings.Join(qCols, ",") + `) VALUES (` + ph + `)`)
 	if err != nil {
 		return err
 	}
@@ -449,10 +449,10 @@ func writeSQLite(path string, cols []string, rows []Row) error {
 		}
 	}
 	for _, idx := range []string{
-		`CREATE INDEX IF NOT EXISTS idx_dm_products_cleaned_gtin ON dm_products_cleaned(gtin)`,
-		`CREATE INDEX IF NOT EXISTS idx_dm_products_cleaned_dan ON dm_products_cleaned(dan)`,
-		`CREATE INDEX IF NOT EXISTS idx_dm_products_cleaned_brand ON dm_products_cleaned(brand)`,
-		`CREATE INDEX IF NOT EXISTS idx_dm_products_cleaned_category ON dm_products_cleaned(category_path)`,
+		`CREATE INDEX IF NOT EXISTS idx_sample_products_cleaned_gtin ON sample_products_cleaned(gtin)`,
+		`CREATE INDEX IF NOT EXISTS idx_sample_products_cleaned_dan ON sample_products_cleaned(dan)`,
+		`CREATE INDEX IF NOT EXISTS idx_sample_products_cleaned_brand ON sample_products_cleaned(brand)`,
+		`CREATE INDEX IF NOT EXISTS idx_sample_products_cleaned_category ON sample_products_cleaned(category_path)`,
 	} {
 		if _, err := db.Exec(idx); err != nil {
 			return err
@@ -463,7 +463,7 @@ func writeSQLite(path string, cols []string, rows []Row) error {
 
 func buildProfile(rows []Row, headerCounts map[string]int, sourceRows, invalidRows int) string {
 	lines := []string{
-		"# dm_products_all profiling + cleaning report",
+		"# sample_products_all profiling + cleaning report",
 		"",
 		"## Dataset shape",
 		fmt.Sprintf("- Source rows read: %s", fmtInt(sourceRows)),
