@@ -1,12 +1,12 @@
 BIN_DIR := bin
 
-.PHONY: serve-easy serve-medium test build-easy-server build-medium-server build-compare-csv build-process-products build-shuffle-csv build-all
+.PHONY: serve-easy serve-medium-server-1 test build-easy-server build-medium-server-1 build-compare-csv build-process-products build-shuffle-csv build-all
 
 serve-easy:
 	GOWORK=off go run ./cmd/easy-server -path outputs/sample_products_cleaned.sqlite -id gtin
 
-serve-medium:
-	GOWORK=off go run ./cmd/medium-server -path outputs/sample_products_cleaned.sqlite -id gtin
+serve-medium-server-1:
+	GOWORK=off go run ./cmd/medium-server-1 -path outputs/sample_products_cleaned.sqlite -id gtin
 
 test:
 	GOCACHE=/tmp/gocache GOWORK=off go test ./cmd/compare-csv -v
@@ -15,9 +15,9 @@ build-easy-server:
 	mkdir -p $(BIN_DIR)
 	GOCACHE=/tmp/gocache GOWORK=off go build -o $(BIN_DIR)/easy-server ./cmd/easy-server
 
-build-medium-server:
+build-medium-server-1:
 	mkdir -p $(BIN_DIR)
-	GOCACHE=/tmp/gocache GOWORK=off go build -o $(BIN_DIR)/medium-server ./cmd/medium-server
+	GOCACHE=/tmp/gocache GOWORK=off go build -o $(BIN_DIR)/medium-server-1 ./cmd/medium-server-1
 
 build-compare-csv:
 	mkdir -p $(BIN_DIR)
@@ -31,4 +31,4 @@ build-shuffle-csv:
 	mkdir -p $(BIN_DIR)
 	GOCACHE=/tmp/gocache GOWORK=off go build -o $(BIN_DIR)/shuffle-csv ./cmd/shuffle-csv
 
-build-all: build-easy-server build-medium-server build-compare-csv build-process-products build-shuffle-csv
+build-all: build-easy-server build-medium-server-1 build-compare-csv build-process-products build-shuffle-csv

@@ -12,13 +12,13 @@ The goal is to test extraction quality without hitting real websites and without
 
 ## Project Status
 
-- Implemented: reference data tooling (Go), comparison module (Go), `easy-server` (Go), `medium-server` (Go), internal candidate shuffler utility (Go)
+- Implemented: reference data tooling (Go), comparison module (Go), `easy-server` (Go), `medium-server-1` (Go), internal candidate shuffler utility (Go)
 - Planned / documented: `hard` challenge server (see `SPEC.md`)
 
 ## Available Servers (Current)
 
 - `easy-server`: easiest variant; public JSON APIs + open sitemaps + low extraction friction.
-- `medium-server`: medium variant; no public JSON APIs, data embedded inline in HTML source, harder than easy but still structured.
+- `medium-server-1`: medium variant; no public JSON APIs, data embedded inline in HTML source, harder than easy but still structured.
 - `hard-server` (planned): hardest variant; reduced discoverability and additional extraction friction/constraints.
 
 ## High-Level Architecture
@@ -97,7 +97,7 @@ Useful flags:
 - `--profile`
 - `--limit`
 
-### 2) Test Storefront Servers (`cmd/easy-server`, `cmd/medium-server`)
+### 2) Test Storefront Servers (`cmd/easy-server`, `cmd/medium-server-1`)
 
 The server reads the generated SQLite DB and exposes:
 
@@ -109,7 +109,7 @@ The server reads the generated SQLite DB and exposes:
 Current implementation:
 
 - `cmd/easy-server`: easiest; public APIs and open sitemap routes.
-- `cmd/medium-server`: medium; no public APIs, data is embedded inline in HTML.
+- `cmd/medium-server-1`: medium; no public APIs, data is embedded inline in HTML.
 - `hard` variant: planned (see `SPEC.md`)
 
 Example:
@@ -119,7 +119,7 @@ go run ./cmd/easy-server -path outputs/sample_products_cleaned.sqlite -id gtin -
 ```
 
 ```bash
-go run ./cmd/medium-server -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:8082
+go run ./cmd/medium-server-1 -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:18744
 ```
 
 Then open:
@@ -220,7 +220,7 @@ make build-all
 bin/process-products
 bin/easy-server -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:8080
 # or:
-# bin/medium-server -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:8082
+# bin/medium-server-1 -path outputs/sample_products_cleaned.sqlite -id gtin -addr 127.0.0.1:18744
 ```
 
 Then run your extractor against the local server and compare its CSV output:
@@ -244,7 +244,7 @@ Or run the server directly with the provided Make target:
 ```bash
 make serve-easy
 # or
-make serve-medium
+make serve-medium-server-1
 ```
 
 ## Testing
@@ -266,7 +266,7 @@ Notes:
 cmd/
   compare-csv/      CSV comparison/scoring CLI
   easy-server/      easiest storefront (public APIs + sitemap)
-  medium-server/    medium storefront (no public APIs; inline JSON in HTML)
+  medium-server-1/    medium storefront (no public APIs; inline JSON in HTML)
   process-products/ reference data builder (JSONL -> CSV/SQLite/profile)
   shuffle-csv/      internal candidate generator for comparator tests
 
@@ -275,7 +275,7 @@ outputs/            local generated artifacts (ignored)
 
 SPEC.md                     challenge-variant roadmap
 EASY_SERVER_SPEC.md         easy variant behavior (public API + sitemap)
-MEDIUM_SERVER_SPEC.md       medium variant behavior (inline JSON, no public API)
+MEDIUM_SERVER_1_SPEC.md     medium variant behavior (inline JSON, no public API)
 COMPARISON_MODULE_SPEC.md   comparator design notes
 COMPARISON_BASELINE_RESULTS.md  parity/baseline expectations
 ```

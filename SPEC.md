@@ -5,7 +5,7 @@ Extest is a testing library for evaluating the creation of web extraction tools.
 ## Current Availability
 
 - `easy-server` (implemented): easiest variant; public JSON APIs and open sitemaps.
-- `medium-server` (implemented): medium variant; no public JSON APIs, structured data embedded inline in HTML.
+- `medium-server-1` (implemented): medium variant; no public JSON APIs, structured data embedded inline in HTML.
 - `hard-server` (planned): hardest variant; additional discovery friction and anti-extraction constraints.
 
 ## Test Site Versions

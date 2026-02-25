@@ -5,7 +5,7 @@ This document describes the intended behavior of `cmd/easy-server`.
 ## Available Servers (Context)
 
 - `easy-server` (implemented): easiest; public JSON APIs + open sitemaps.
-- `medium-server` (implemented): medium; no public JSON APIs, inline JSON embedded in HTML.
+- `medium-server-1` (implemented): medium; no public JSON APIs, inline JSON embedded in HTML.
 - `hard-server` (planned): hardest; additional discovery and anti-extraction constraints.
 
 ## Goal

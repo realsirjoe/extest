@@ -17,7 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const defaultAddr = "127.0.0.1:8082"
+const defaultAddr = "127.0.0.1:18744"
 const sitemapProtocolMaxURLs = 50000
 const defaultSitemapChunkSize = 10000
 
@@ -181,7 +181,7 @@ func main() {
 		}
 	})
 
-	log.Printf("medium-server listening on %s (table=%s id=%s)", *addr, table, *idCol)
+	log.Printf("medium-server-1 listening on %s (table=%s id=%s)", *addr, table, *idCol)
 	if err := http.ListenAndServe(*addr, mux); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
