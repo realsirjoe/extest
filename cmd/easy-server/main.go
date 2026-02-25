@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 )
 
 const defaultAddr = "127.0.0.1:8080"
+const sitemapProtocolMaxURLs = 50000
+const defaultSitemapChunkSize = 10000
 
 func main() {
 	flag.Usage = func() {
@@ -27,6 +30,7 @@ func main() {
 	dbPath := flag.String("path", "", "Path to sqlite database")
 	idCol := flag.String("id", "", "Name of the unique ID column used for lookup")
 	addr := flag.String("addr", defaultAddr, "HTTP listen address")
+	sitemapChunkSize := flag.Int("sitemap-chunk-size", defaultSitemapChunkSize, "Max product URLs per sitemap file (capped at 50000)")
 	flag.Parse()
 
 	if *dbPath == "" {
@@ -34,6 +38,12 @@ func main() {
 	}
 	if *idCol == "" {
 		log.Fatal("missing -id column name")
+	}
+	if *sitemapChunkSize <= 0 {
+		*sitemapChunkSize = defaultSitemapChunkSize
+	}
+	if *sitemapChunkSize > sitemapProtocolMaxURLs {
+		*sitemapChunkSize = sitemapProtocolMaxURLs
 	}
 
 	if _, err := os.Stat(*dbPath); err != nil {
@@ -63,6 +73,57 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		total, err := countNonEmptyIDs(db, table, *idCol)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			log.Printf("sitemap count error: %v", err)
+			return
+		}
+		baseURL := requestBaseURL(r)
+		payload := buildSitemapIndexXML(baseURL, total, *sitemapChunkSize)
+		writeXML(w, payload)
+	})
+	mux.HandleFunc("/sitemaps/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		pageNum, ok := parseProductSitemapPage(r.URL.Path)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		total, err := countNonEmptyIDs(db, table, *idCol)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			log.Printf("sitemap count error: %v", err)
+			return
+		}
+		if total == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		pageCount := (total + *sitemapChunkSize - 1) / *sitemapChunkSize
+		if pageNum < 1 || pageNum > pageCount {
+			http.NotFound(w, r)
+			return
+		}
+		offset := (pageNum - 1) * *sitemapChunkSize
+		ids, err := fetchProductIDsPage(db, table, *idCol, *sitemapChunkSize, offset)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			log.Printf("sitemap page error: %v", err)
+			return
+		}
+		baseURL := requestBaseURL(r)
+		payload := buildProductURLSetXML(baseURL, ids)
+		writeXML(w, payload)
 	})
 	mux.HandleFunc("/api/home", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -186,6 +247,169 @@ func main() {
 	if err := http.ListenAndServe(*addr, mux); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+type sitemapIndexXML struct {
+	XMLName xml.Name        `xml:"sitemapindex"`
+	Xmlns   string          `xml:"xmlns,attr"`
+	Items   []sitemapRefXML `xml:"sitemap"`
+}
+
+type sitemapRefXML struct {
+	Loc     string `xml:"loc"`
+	LastMod string `xml:"lastmod,omitempty"`
+}
+
+type urlSetXML struct {
+	XMLName xml.Name     `xml:"urlset"`
+	Xmlns   string       `xml:"xmlns,attr"`
+	Items   []urlItemXML `xml:"url"`
+}
+
+type urlItemXML struct {
+	Loc string `xml:"loc"`
+}
+
+func writeXML(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	_, _ = w.Write([]byte(xml.Header))
+	enc := xml.NewEncoder(w)
+	enc.Indent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		log.Printf("xml encode error: %v", err)
+	}
+}
+
+func buildSitemapIndexXML(baseURL string, total, chunkSize int) sitemapIndexXML {
+	if chunkSize <= 0 {
+		chunkSize = defaultSitemapChunkSize
+	}
+	if chunkSize > sitemapProtocolMaxURLs {
+		chunkSize = sitemapProtocolMaxURLs
+	}
+	pageCount := 0
+	if total > 0 {
+		pageCount = (total + chunkSize - 1) / chunkSize
+	}
+	items := make([]sitemapRefXML, 0, max(pageCount, 1))
+	if pageCount == 0 {
+		pageCount = 1
+	}
+	now := time.Now().UTC().Format("2006-01-02")
+	for i := 1; i <= pageCount; i++ {
+		items = append(items, sitemapRefXML{
+			Loc:     fmt.Sprintf("%s/sitemaps/products-%d.xml", baseURL, i),
+			LastMod: now,
+		})
+	}
+	return sitemapIndexXML{
+		Xmlns: "http://www.sitemaps.org/schemas/sitemap/0.9",
+		Items: items,
+	}
+}
+
+func buildProductURLSetXML(baseURL string, ids []string) urlSetXML {
+	items := make([]urlItemXML, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, urlItemXML{
+			Loc: fmt.Sprintf("%s/product/%s", baseURL, id),
+		})
+	}
+	return urlSetXML{
+		Xmlns: "http://www.sitemaps.org/schemas/sitemap/0.9",
+		Items: items,
+	}
+}
+
+func requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); proto != "" {
+		if i := strings.Index(proto, ","); i >= 0 {
+			proto = proto[:i]
+		}
+		scheme = strings.TrimSpace(proto)
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = "127.0.0.1:8080"
+	}
+	return scheme + "://" + host
+}
+
+func parseProductSitemapPage(path string) (int, bool) {
+	const prefix = "/sitemaps/products-"
+	const suffix = ".xml"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return 0, false
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if raw == "" || strings.Contains(raw, "/") {
+		return 0, false
+	}
+	n := 0
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		n = (n * 10) + int(ch-'0')
+	}
+	if n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func countNonEmptyIDs(db *sql.DB, table, idCol string) (int, error) {
+	q := fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''`,
+		quoteIdent(table), quoteIdent(idCol), quoteIdent(idCol),
+	)
+	var n int
+	if err := db.QueryRow(q).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func fetchProductIDsPage(db *sql.DB, table, idCol string, limit, offset int) ([]string, error) {
+	if limit <= 0 {
+		limit = defaultSitemapChunkSize
+	}
+	q := fmt.Sprintf(
+		`SELECT %s FROM %s
+		 WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''
+		 ORDER BY %s
+		 LIMIT ? OFFSET ?`,
+		quoteIdent(idCol),
+		quoteIdent(table),
+		quoteIdent(idCol),
+		quoteIdent(idCol),
+		quoteIdent(idCol),
+	)
+	rows, err := db.Query(q, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]string, 0, limit)
+	for rows.Next() {
+		var v any
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		s := strings.TrimSpace(fmt.Sprint(normalizeValue(v)))
+		if s == "" || s == "<nil>" {
+			continue
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func firstUserTable(db *sql.DB) (string, error) {
