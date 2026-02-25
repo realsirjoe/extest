@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -59,41 +58,41 @@ type candProfilePayload struct {
 }
 
 type keyCandidate struct {
-	ReferenceColumn       string  `json:"reference_column"`
-	CandidateColumn       string  `json:"candidate_column"`
-	CompleteSetMatch      bool    `json:"complete_set_match"`
-	IntersectionCount     int     `json:"intersection_count"`
-	CandidateKeyCoverage  float64 `json:"candidate_key_coverage"`
-	ReferenceKeyCoverage  float64 `json:"reference_key_coverage"`
-	HeaderSimilarity      float64 `json:"header_similarity"`
-	ReferenceNonEmpty     int     `json:"reference_non_empty_count"`
-	CandidateNonEmpty     int     `json:"candidate_non_empty_count"`
-	Score                 float64 `json:"score"`
+	ReferenceColumn      string  `json:"reference_column"`
+	CandidateColumn      string  `json:"candidate_column"`
+	CompleteSetMatch     bool    `json:"complete_set_match"`
+	IntersectionCount    int     `json:"intersection_count"`
+	CandidateKeyCoverage float64 `json:"candidate_key_coverage"`
+	ReferenceKeyCoverage float64 `json:"reference_key_coverage"`
+	HeaderSimilarity     float64 `json:"header_similarity"`
+	ReferenceNonEmpty    int     `json:"reference_non_empty_count"`
+	CandidateNonEmpty    int     `json:"candidate_non_empty_count"`
+	Score                float64 `json:"score"`
 }
 
 type keyMatchPayload struct {
-	FoundUsableMatch   bool          `json:"found_usable_match"`
-	FoundCompleteMatch bool          `json:"found_complete_match"`
-	MatchMode          string        `json:"match_mode,omitempty"`
-	ReferenceColumn    *string       `json:"reference_column"`
-	CandidateColumn    *string       `json:"candidate_column"`
-	Reason             string        `json:"reason"`
+	FoundUsableMatch   bool           `json:"found_usable_match"`
+	FoundCompleteMatch bool           `json:"found_complete_match"`
+	MatchMode          string         `json:"match_mode,omitempty"`
+	ReferenceColumn    *string        `json:"reference_column"`
+	CandidateColumn    *string        `json:"candidate_column"`
+	Reason             string         `json:"reason"`
 	Candidates         []keyCandidate `json:"candidates"`
 }
 
 type rowAlignmentPayload struct {
-	Complete                      bool      `json:"complete"`
-	ReferenceKey                  string    `json:"reference_key,omitempty"`
-	CandidateKey                  string    `json:"candidate_key,omitempty"`
-	MatchedRows                   int       `json:"matched_rows"`
-	ReferenceRows                 int       `json:"reference_rows"`
-	CandidateRows                 int       `json:"candidate_rows"`
-	CoverageReference             float64   `json:"coverage_reference"`
-	CoverageCandidate             float64   `json:"coverage_candidate"`
-	DuplicateReferenceKeys        int       `json:"duplicate_reference_keys,omitempty"`
-	DuplicateCandidateMatches     int       `json:"duplicate_candidate_matches,omitempty"`
-	MissingCandidateKeysOrMissing int       `json:"missing_candidate_keys_or_unmatched,omitempty"`
-	Pairs                         [][2]int  `json:"-"`
+	Complete                      bool     `json:"complete"`
+	ReferenceKey                  string   `json:"reference_key,omitempty"`
+	CandidateKey                  string   `json:"candidate_key,omitempty"`
+	MatchedRows                   int      `json:"matched_rows"`
+	ReferenceRows                 int      `json:"reference_rows"`
+	CandidateRows                 int      `json:"candidate_rows"`
+	CoverageReference             float64  `json:"coverage_reference"`
+	CoverageCandidate             float64  `json:"coverage_candidate"`
+	DuplicateReferenceKeys        int      `json:"duplicate_reference_keys,omitempty"`
+	DuplicateCandidateMatches     int      `json:"duplicate_candidate_matches,omitempty"`
+	MissingCandidateKeysOrMissing int      `json:"missing_candidate_keys_or_unmatched,omitempty"`
+	Pairs                         [][2]int `json:"-"`
 }
 
 type mappingPair struct {
@@ -114,15 +113,15 @@ type columnMappingPayload struct {
 }
 
 type perColumnScore struct {
-	ReferenceColumn   string   `json:"reference_column"`
-	CandidateColumn   *string  `json:"candidate_column"`
-	Similarity        float64  `json:"similarity"`
-	Matched           bool     `json:"matched"`
-	Reason            string   `json:"reason,omitempty"`
-	MappingConfidence float64  `json:"mapping_confidence,omitempty"`
-	RowCountScored    int      `json:"row_count_scored,omitempty"`
-	HeaderSimilarity  float64  `json:"header_similarity,omitempty"`
-	SampleSimilarity  float64  `json:"sample_similarity,omitempty"`
+	ReferenceColumn   string  `json:"reference_column"`
+	CandidateColumn   *string `json:"candidate_column"`
+	Similarity        float64 `json:"similarity"`
+	Matched           bool    `json:"matched"`
+	Reason            string  `json:"reason,omitempty"`
+	MappingConfidence float64 `json:"mapping_confidence,omitempty"`
+	RowCountScored    int     `json:"row_count_scored,omitempty"`
+	HeaderSimilarity  float64 `json:"header_similarity,omitempty"`
+	SampleSimilarity  float64 `json:"sample_similarity,omitempty"`
 }
 
 type scoresPayload struct {
@@ -134,19 +133,36 @@ type scoresPayload struct {
 }
 
 type reportPayload struct {
-	Status          string              `json:"status"`
-	Config          configPayload       `json:"config"`
-	ReferenceProfile refProfilePayload  `json:"reference_profile"`
-	CandidateProfile candProfilePayload `json:"candidate_profile"`
-	RowAlignment     rowAlignmentPayload `json:"row_alignment"`
-	KeyMatch         keyMatchPayload    `json:"key_match"`
+	Status           string               `json:"status"`
+	Config           configPayload        `json:"config"`
+	ReferenceProfile refProfilePayload    `json:"reference_profile"`
+	CandidateProfile candProfilePayload   `json:"candidate_profile"`
+	RowAlignment     rowAlignmentPayload  `json:"row_alignment"`
+	KeyMatch         keyMatchPayload      `json:"key_match"`
 	ColumnMapping    columnMappingPayload `json:"column_mapping"`
-	Scores           scoresPayload      `json:"scores"`
+	Scores           scoresPayload        `json:"scores"`
 }
 
 var (
-	reNumeric = regexp.MustCompile(`^[+-]?(?:\d+\.?\d*|\.\d+)$`)
-	reToken   = regexp.MustCompile(`[a-z0-9]+`)
+	reNumeric          = regexp.MustCompile(`^[+-]?(?:\d+\.?\d*|\.\d+)$`)
+	reToken            = regexp.MustCompile(`[a-z0-9]+`)
+	headerTokenAliases = map[string]string{
+		"crumb":      "breadcrumb",
+		"crumbs":     "breadcrumbs",
+		"tree":       "path",
+		"details":    "desc",
+		"highlights": "eyecatchers",
+		"badges":     "pills",
+		"reviews":    "rating",
+		"score":      "value",
+		"qty":        "quantity",
+		"pack":       "unit",
+		"subline":    "subheadline",
+		"amt":        "",
+		"code":       "",
+		"is":         "has",
+		"product":    "",
+	}
 )
 
 func main() {
@@ -188,6 +204,9 @@ func main() {
 }
 
 func compareCSVFiles(referenceCSV, candidateCSV string, sampleSizeMapping int) (reportPayload, error) {
+	if sampleSizeMapping < 0 {
+		sampleSizeMapping = 0
+	}
 	ref, err := loadCSV(referenceCSV)
 	if err != nil {
 		return reportPayload{}, err
@@ -535,7 +554,7 @@ func alignRowsByKey(ref, cand csvTable, refKey, candKey string) rowAlignmentPayl
 
 func mapColumns(ref, cand csvTable, refProfiles, candProfiles map[string]colProfile, pairs [][2]int, sampleSize int) columnMappingPayload {
 	samplePairs := pairs
-	if len(samplePairs) > sampleSize {
+	if sampleSize > 0 && len(samplePairs) > sampleSize {
 		samplePairs = samplePairs[:sampleSize]
 	}
 	allPairs := make([]mappingPair, 0, len(ref.Headers)*len(cand.Headers))
@@ -853,8 +872,7 @@ func canonicalScalar(v string) string {
 		return "false"
 	}
 	if r, ok := parseDecimal(v); ok {
-		f, _ := new(big.Float).SetRat(r).Float64()
-		return strconv.FormatFloat(f, 'f', -1, 64)
+		return r.RatString()
 	}
 	return normalizeText(v)
 }
@@ -872,24 +890,7 @@ func headerTokens(name string) []string {
 }
 
 func canonHeaderToken(t string) string {
-	aliases := map[string]string{
-		"crumb":      "breadcrumb",
-		"crumbs":     "breadcrumbs",
-		"tree":       "path",
-		"details":    "desc",
-		"highlights": "eyecatchers",
-		"badges":     "pills",
-		"reviews":    "rating",
-		"score":      "value",
-		"qty":        "quantity",
-		"pack":       "unit",
-		"subline":    "subheadline",
-		"amt":        "",
-		"code":       "",
-		"is":         "has",
-		"product":    "",
-	}
-	if v, ok := aliases[t]; ok {
+	if v, ok := headerTokenAliases[t]; ok {
 		return v
 	}
 	return t

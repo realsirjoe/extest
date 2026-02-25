@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -136,6 +138,26 @@ func TestCompareCSV_NoUsableKeyMatchWhenCandidateKeysRemoved(t *testing.T) {
 	}
 }
 
+func TestCompareCSV_NegativeSampleSizeMappingIsClamped(t *testing.T) {
+	report, err := compareCSVFiles(
+		testdataPath("sample_products_reference_500.csv"),
+		testdataPath("sample_products_candidate1_500.csv"),
+		-5,
+	)
+	if err != nil {
+		t.Fatalf("compareCSVFiles error: %v", err)
+	}
+	if report.Status != "ok" {
+		t.Fatalf("expected status ok, got %q", report.Status)
+	}
+	if !almostEqual(report.Scores.DatasetSimilarityEqualWeighted, 1.0) {
+		t.Fatalf("expected dataset similarity 1.0, got %.15f", report.Scores.DatasetSimilarityEqualWeighted)
+	}
+	if report.Config.SampleSizeMapping != 0 {
+		t.Fatalf("expected clamped sample_size_mapping=0, got %d", report.Config.SampleSizeMapping)
+	}
+}
+
 func writeCSVWithoutColumns(src, dst string, drop map[string]struct{}, blankValues bool) error {
 	b, err := os.ReadFile(src)
 	if err != nil {
@@ -174,10 +196,10 @@ func writeCSVWithoutColumns(src, dst string, drop map[string]struct{}, blankValu
 	}
 	for {
 		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
-			if err.Error() == "EOF" {
-				break
-			}
 			return err
 		}
 		out := make([]string, 0, len(keepIdx))

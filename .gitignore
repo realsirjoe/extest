@@ -20,6 +20,8 @@ bin/
 dist/
 /easy-server
 /compare-csv
+/process-products
+/shuffle-csv
 
 # Go workspace files (optional/local)
 go.work
