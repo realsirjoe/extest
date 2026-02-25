@@ -1009,8 +1009,30 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
       margin-left: 8px;
     }
     .desc { margin-top: 18px; line-height: 1.7; font-size: 16px; color: #1f2937; max-width: 60ch; }
+    .rating-box {
+      margin-top: 16px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: #f8fafc;
+      padding: 12px 14px;
+    }
+    .rating-label { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+    .rating-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .rating-stars { color: #f59e0b; letter-spacing: 1px; font-size: 16px; }
+    .rating-text { color: #334155; font-size: 14px; }
     .specs { margin-top: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; font-size: 14px; color: var(--muted); }
     .specs div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .details {
+      margin-top: 18px;
+    }
+    .details h2 { margin: 0 0 6px; font-size: 18px; }
+    .details-sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+    .details-table-wrap { overflow: auto; border: 1px solid rgba(15,23,42,0.08); border-radius: 12px; background: #fff; }
+    .details-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .details-table th, .details-table td { padding: 10px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid rgba(15,23,42,0.06); }
+    .details-table th { width: 28%; min-width: 180px; color: var(--muted); font-weight: 600; background: #fcfcfd; }
+    .details-table td { color: #111827; white-space: pre-wrap; word-break: break-word; }
+    .details-table tr:last-child th, .details-table tr:last-child td { border-bottom: 0; }
     .recs {
       margin-top: 26px;
       background: rgba(255,255,255,0.72);
@@ -1106,6 +1128,13 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
         <a class="cta" href="#">Add to cart</a>
         <a class="cta-secondary" href="#">Wishlist</a>
         <div class="desc" id="product-desc" hidden></div>
+        <div class="rating-box" id="product-rating" hidden>
+          <div class="rating-label">Customer Rating</div>
+          <div class="rating-row">
+            <div class="rating-stars" id="product-rating-stars"></div>
+            <div class="rating-text" id="product-rating-text"></div>
+          </div>
+        </div>
         <div class="meta" id="product-load-status">Loading product details from API…</div>
         <div class="specs">
           <div>Shipping: 2-4 days</div>
@@ -1113,6 +1142,15 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
           <div>Support: Email & chat</div>
           <div>Secure checkout</div>
         </div>
+        <section class="details" id="product-details" hidden>
+          <h2>Additional details</h2>
+          <div class="details-sub">Non-standard product fields provided by this catalog entry.</div>
+          <div class="details-table-wrap">
+            <table class="details-table">
+              <tbody id="product-details-body"></tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </div>
     <section class="recs" id="similar-products">
@@ -1138,6 +1176,11 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
       var catWrapEl = document.getElementById("product-category-wrap");
       var catEl = document.getElementById("product-category");
       var descEl = document.getElementById("product-desc");
+      var ratingBoxEl = document.getElementById("product-rating");
+      var ratingStarsEl = document.getElementById("product-rating-stars");
+      var ratingTextEl = document.getElementById("product-rating-text");
+      var detailsSectionEl = document.getElementById("product-details");
+      var detailsBodyEl = document.getElementById("product-details-body");
       var loadStatusEl = document.getElementById("product-load-status");
       if (!productId || !statusEl || !gridEl || !sectionEl) return;
 
@@ -1195,6 +1238,88 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
         mediaEl.innerHTML = '<img src="' + escapeHtml(src) + '" alt="' + escapeHtml(name || "Product") + '" />';
       }
 
+      function parseNumber(v) {
+        if (typeof v === "number" && Number.isFinite(v)) return v;
+        if (typeof v === "string") {
+          var n = Number(v.trim());
+          if (Number.isFinite(n)) return n;
+        }
+        return null;
+      }
+
+      function renderRating(row) {
+        if (!ratingBoxEl || !ratingStarsEl || !ratingTextEl) return;
+        var rv = parseNumber(row.rating_value);
+        var rc = parseNumber(row.rating_count);
+        if (!(rv > 0) && !(rc > 0)) {
+          ratingBoxEl.hidden = true;
+          return;
+        }
+        var stars = "";
+        if (rv > 0) {
+          var rounded = Math.max(0, Math.min(5, rv));
+          var full = Math.round(rounded);
+          for (var i = 0; i < 5; i++) stars += i < full ? "★" : "☆";
+          ratingStarsEl.textContent = stars + " " + rounded.toFixed(1);
+          ratingTextEl.textContent = (rc > 0 ? (Math.round(rc) + " ratings") : "Customer reviews available");
+        } else {
+          ratingStarsEl.textContent = "";
+          ratingTextEl.textContent = Math.round(rc) + " ratings";
+        }
+        ratingBoxEl.hidden = false;
+      }
+
+      function formatFieldLabel(key) {
+        return String(key || "")
+          .replace(/^desc_/, "description_")
+          .replace(/_/g, " ")
+          .replace(/\b\w/g, function (ch) { return ch.toUpperCase(); });
+      }
+
+      function isMeaningfulValue(v) {
+        if (v === null || v === undefined) return false;
+        if (typeof v === "string") return v.trim() !== "";
+        return true;
+      }
+
+      function valueText(v) {
+        if (v === null || v === undefined) return "";
+        if (typeof v === "object") {
+          try { return JSON.stringify(v); } catch (_) { return String(v); }
+        }
+        return String(v);
+      }
+
+      function renderAdditionalDetails(row) {
+        if (!detailsSectionEl || !detailsBodyEl) return;
+        var excluded = {
+          gtin: true, dan: true,
+          name: true, title_headline: true,
+          brand: true, seo_brand: true,
+          price_raw: true, price_eur: true, metadata_price_eur: true, currency: true,
+          category_path: true, seo_category: true,
+          image: true, image_url: true, img: true, thumbnail: true,
+          desc_productbeschreibung: true, metadata_description: true,
+          rating_value: true, rating_count: true
+        };
+        var rows = [];
+        Object.keys(row || {}).sort().forEach(function (key) {
+          if (excluded[key]) return;
+          var val = row[key];
+          if (!isMeaningfulValue(val)) return;
+          rows.push(
+            "<tr><th>" + escapeHtml(formatFieldLabel(key)) + "</th><td>" + escapeHtml(valueText(val)) + "</td></tr>"
+          );
+        });
+        if (rows.length === 0) {
+          detailsBodyEl.innerHTML = "";
+          detailsSectionEl.hidden = true;
+          return;
+        }
+        detailsBodyEl.innerHTML = rows.join("");
+        detailsSectionEl.hidden = false;
+      }
+
       function hydrateProduct(row) {
         var name = firstNonEmpty(row.name, row.title_headline, "Product " + productId);
         var brand = firstNonEmpty(row.brand, row.seo_brand, "Unknown brand");
@@ -1225,8 +1350,10 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
             descEl.hidden = true;
           }
         }
+        renderRating(row);
+        renderAdditionalDetails(row);
         if (loadStatusEl) {
-          loadStatusEl.textContent = "Rendered client-side from /api/product/" + productId;
+          loadStatusEl.hidden = true;
         }
       }
 
@@ -1241,6 +1368,7 @@ var productPageTemplate = template.Must(template.New("product").Parse(`<!doctype
         })
         .catch(function (err) {
           if (loadStatusEl) {
+            loadStatusEl.hidden = false;
             loadStatusEl.textContent = err && err.message === "NOT_FOUND"
               ? "Product not found."
               : "Could not load product details right now.";
@@ -1596,7 +1724,7 @@ var homePageTemplate = template.Must(template.New("home").Parse(`<!doctype html>
         <button class="search-submit" type="submit">Search</button>
       </form>
       <div class="top-actions">
-        <a class="chip" href="#">Offers</a>
+        <a class="chip" href="/">Offers</a>
         <a class="chip" href="#">Account</a>
       </div>
     </div>
@@ -1974,7 +2102,7 @@ var searchPageTemplate = template.Must(template.New("search").Parse(`<!doctype h
         <button class="search-submit" type="submit">Search</button>
       </form>
       <div class="top-actions">
-        <a class="chip" href="#">Offers</a>
+        <a class="chip" href="/">Offers</a>
         <a class="chip" href="#">Account</a>
       </div>
     </div>
