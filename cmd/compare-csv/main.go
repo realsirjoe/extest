@@ -872,9 +872,47 @@ func canonicalScalar(v string) string {
 		return "false"
 	}
 	if r, ok := parseDecimal(v); ok {
-		return r.RatString()
+		_ = r
+		return canonicalDecimalString(v)
 	}
 	return normalizeText(v)
+}
+
+func canonicalDecimalString(v string) string {
+	s := normalizeText(v)
+	if s == "" {
+		return ""
+	}
+	sign := ""
+	if strings.HasPrefix(s, "+") {
+		s = s[1:]
+	} else if strings.HasPrefix(s, "-") {
+		sign = "-"
+		s = s[1:]
+	}
+	intPart, fracPart, hasDot := s, "", false
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		hasDot = true
+		intPart = s[:i]
+		fracPart = s[i+1:]
+	}
+	intPart = strings.TrimLeft(intPart, "0")
+	if intPart == "" {
+		intPart = "0"
+	}
+	if hasDot {
+		fracPart = strings.TrimRight(fracPart, "0")
+	}
+	if fracPart == "" {
+		if intPart == "0" {
+			return "0"
+		}
+		return sign + intPart
+	}
+	if intPart == "0" && fracPart == "" {
+		return "0"
+	}
+	return sign + intPart + "." + fracPart
 }
 
 func headerTokens(name string) []string {
