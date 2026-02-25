@@ -141,12 +141,7 @@ func main() {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(payload); err != nil {
-			log.Printf("encode error: %v", err)
-		}
+		writeJSON(w, payload)
 	})
 	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -176,12 +171,7 @@ func main() {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(payload); err != nil {
-			log.Printf("encode error: %v", err)
-		}
+		writeJSON(w, payload)
 	})
 	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search" {
@@ -233,12 +223,7 @@ func main() {
 				return
 			}
 
-			w.Header().Set("Content-Type", "application/json")
-			enc := json.NewEncoder(w)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(similar); err != nil {
-				log.Printf("encode error: %v", err)
-			}
+			writeJSON(w, similar)
 			return
 		}
 
@@ -254,12 +239,7 @@ func main() {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(row); err != nil {
-			log.Printf("encode error: %v", err)
-		}
+		writeJSON(w, row)
 	})
 	mux.HandleFunc("/product/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/product/")
@@ -808,15 +788,13 @@ func fetchSearchItems(db *sql.DB, table string, searchFields []string, idCol str
 
 	args := make([]any, 0, len(whereArgs)+len(searchFields)+2)
 	args = append(args, whereArgs...)
-	prefixPattern := strings.TrimSuffix(whereArgs[0].(string), "%") // "%query" -> "%query" not what we need; replaced below
-	_ = prefixPattern
 	// Use q% ranking pattern derived from the substring pattern input.
 	if len(whereArgs) > 0 {
-		substrPattern, _ := whereArgs[0].(string)
-		trimmed := strings.TrimPrefix(strings.TrimSuffix(substrPattern, "%"), "%")
-		prefix := trimmed + "%"
-		for range searchFields {
-			args = append(args, prefix)
+		if substrPattern, ok := whereArgs[0].(string); ok {
+			prefix := prefixLikePatternFromSubstringPattern(substrPattern)
+			for range searchFields {
+				args = append(args, prefix)
+			}
 		}
 	}
 	args = append(args, limit, offset)
@@ -873,6 +851,11 @@ func escapeLikePattern(s string) string {
 	return replacer.Replace(s)
 }
 
+func prefixLikePatternFromSubstringPattern(substrPattern string) string {
+	trimmed := strings.TrimPrefix(strings.TrimSuffix(substrPattern, "%"), "%")
+	return trimmed + "%"
+}
+
 func parsePageQueryParam(r *http.Request, key string, fallback int) (int, bool) {
 	raw := strings.TrimSpace(r.URL.Query().Get(key))
 	if raw == "" {
@@ -882,8 +865,7 @@ func parsePageQueryParam(r *http.Request, key string, fallback int) (int, bool) 
 	if err != nil || n64 < 1 {
 		return 0, false
 	}
-	maxInt := int64(^uint(0) >> 1)
-	if n64 > maxInt {
+	if n64 > maxIntValue() {
 		return 0, false
 	}
 	return int(n64), true
@@ -895,11 +877,23 @@ func pageOffset(page, perPage int) (int, bool) {
 	}
 	p := int64(page - 1)
 	sz := int64(perPage)
-	maxInt := int64(^uint(0) >> 1)
-	if p > maxInt/sz {
+	if p > maxIntValue()/sz {
 		return 0, false
 	}
 	return int(p * sz), true
+}
+
+func maxIntValue() int64 {
+	return int64(^uint(0) >> 1)
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		log.Printf("encode error: %v", err)
+	}
 }
 
 func normalizeValue(v any) any {
