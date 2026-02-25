@@ -132,8 +132,25 @@ type scoresPayload struct {
 	PerReferenceColumn             []perColumnScore `json:"per_reference_column"`
 }
 
+type summaryPayload struct {
+	Status                         string  `json:"status"`
+	DatasetSimilarityEqualWeighted float64 `json:"dataset_similarity_equal_weighted"`
+	CoverageReference              float64 `json:"coverage_reference"`
+	CoverageCandidate              float64 `json:"coverage_candidate"`
+	OverallScoreWithCoverage       float64 `json:"overall_score_with_coverage"`
+	MatchedRows                    int     `json:"matched_rows"`
+	ReferenceRows                  int     `json:"reference_rows"`
+	CandidateRows                  int     `json:"candidate_rows"`
+	MappedReferenceColumns         int     `json:"mapped_reference_columns"`
+	ReferenceColumnsTotal          int     `json:"reference_columns_total"`
+	KeyMatchMode                   string  `json:"key_match_mode,omitempty"`
+	KeyReferenceColumn             *string `json:"key_reference_column,omitempty"`
+	KeyCandidateColumn             *string `json:"key_candidate_column,omitempty"`
+}
+
 type reportPayload struct {
 	Status           string               `json:"status"`
+	Summary          summaryPayload       `json:"summary"`
 	Config           configPayload        `json:"config"`
 	ReferenceProfile refProfilePayload    `json:"reference_profile"`
 	CandidateProfile candProfilePayload   `json:"candidate_profile"`
@@ -257,6 +274,7 @@ func compareCSVFiles(referenceCSV, candidateCSV string, sampleSizeMapping int) (
 		KeyMatch:      keyMatch,
 		ColumnMapping: columnMapping,
 		Scores:        scores,
+		Summary:       buildSummary(ternary(alignment.Complete, "ok", "partial_key_match"), alignment, keyMatch, scores),
 	}, nil
 }
 
@@ -317,6 +335,12 @@ func zeroResult(ref, cand csvTable, refProfiles, candProfiles map[string]colProf
 	}
 	return reportPayload{
 		Status: "no_complete_key_match",
+		Summary: buildSummary("no_complete_key_match", alignment, keyMatch, scoresPayload{
+			DatasetSimilarityEqualWeighted: 0,
+			OverallScoreWithCoverage:       0,
+			MappedReferenceColumns:         0,
+			ReferenceColumnsTotal:          len(ref.Headers),
+		}),
 		Config: configPayload{
 			ReferenceCSV:             ref.Path,
 			CandidateCSV:             cand.Path,
@@ -346,6 +370,24 @@ func zeroResult(ref, cand csvTable, refProfiles, candProfiles map[string]colProf
 			ReferenceColumnsTotal:          len(ref.Headers),
 			PerReferenceColumn:             per,
 		},
+	}
+}
+
+func buildSummary(status string, alignment rowAlignmentPayload, keyMatch keyMatchPayload, scores scoresPayload) summaryPayload {
+	return summaryPayload{
+		Status:                         status,
+		DatasetSimilarityEqualWeighted: scores.DatasetSimilarityEqualWeighted,
+		CoverageReference:              alignment.CoverageReference,
+		CoverageCandidate:              alignment.CoverageCandidate,
+		OverallScoreWithCoverage:       scores.OverallScoreWithCoverage,
+		MatchedRows:                    alignment.MatchedRows,
+		ReferenceRows:                  alignment.ReferenceRows,
+		CandidateRows:                  alignment.CandidateRows,
+		MappedReferenceColumns:         scores.MappedReferenceColumns,
+		ReferenceColumnsTotal:          scores.ReferenceColumnsTotal,
+		KeyMatchMode:                   keyMatch.MatchMode,
+		KeyReferenceColumn:             keyMatch.ReferenceColumn,
+		KeyCandidateColumn:             keyMatch.CandidateColumn,
 	}
 }
 
