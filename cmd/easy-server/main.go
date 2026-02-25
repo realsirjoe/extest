@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,9 @@ import (
 const defaultAddr = "127.0.0.1:8080"
 const sitemapProtocolMaxURLs = 50000
 const defaultSitemapChunkSize = 10000
+const searchMinChars = 3
+const defaultSearchLimit = 20
+const maxSearchLimit = 50
 
 func main() {
 	flag.Usage = func() {
@@ -135,6 +139,42 @@ func main() {
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			log.Printf("home payload error: %v", err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(payload); err != nil {
+			log.Printf("encode error: %v", err)
+		}
+	})
+	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		if len([]rune(q)) < searchMinChars {
+			http.Error(w, fmt.Sprintf("query must be at least %d characters", searchMinChars), http.StatusBadRequest)
+			return
+		}
+		limit := parseIntQueryParam(r, "limit", defaultSearchLimit)
+		offset := parseIntQueryParam(r, "offset", 0)
+		if limit <= 0 {
+			limit = defaultSearchLimit
+		}
+		if limit > maxSearchLimit {
+			limit = maxSearchLimit
+		}
+		if offset < 0 {
+			offset = 0
+		}
+
+		payload, err := fetchSearchPayload(db, table, cols, *idCol, q, limit, offset)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			log.Printf("search error: %v", err)
 			return
 		}
 
@@ -543,6 +583,17 @@ type homeSection struct {
 	Items       []map[string]any `json:"items"`
 }
 
+type searchPayload struct {
+	Query          string           `json:"query"`
+	MinQueryLength int              `json:"min_query_length"`
+	Limit          int              `json:"limit"`
+	Offset         int              `json:"offset"`
+	Total          int              `json:"total"`
+	Returned       int              `json:"returned"`
+	SearchFields   []string         `json:"search_fields"`
+	Items          []map[string]any `json:"items"`
+}
+
 func fetchHomePayload(db *sql.DB, table string) (homePayload, error) {
 	sections := []homeSection{}
 
@@ -668,6 +719,148 @@ func fetchHomeSectionItems(db *sql.DB, table, where, order string, limit int, ar
 		return nil, err
 	}
 	return out, nil
+}
+
+func fetchSearchPayload(db *sql.DB, table string, cols []string, idCol, query string, limit, offset int) (searchPayload, error) {
+	searchFields := make([]string, 0, 3)
+	for _, c := range []string{"name", "brand", "category_path"} {
+		if contains(cols, c) {
+			searchFields = append(searchFields, c)
+		}
+	}
+	if len(searchFields) == 0 {
+		return searchPayload{}, fmt.Errorf("no searchable columns available")
+	}
+
+	idSelectName := "gtin"
+	if !contains(cols, "gtin") {
+		idSelectName = idCol
+	}
+	if !contains(cols, idSelectName) {
+		return searchPayload{}, fmt.Errorf("id column %q not found for search result selection", idSelectName)
+	}
+
+	pattern := "%" + escapeLikePattern(query) + "%"
+	whereParts := make([]string, 0, len(searchFields))
+	whereArgs := make([]any, 0, len(searchFields))
+	for _, f := range searchFields {
+		whereParts = append(whereParts, fmt.Sprintf("%s LIKE ? ESCAPE '\\'", quoteIdent(f)))
+		whereArgs = append(whereArgs, pattern)
+	}
+	whereClause := strings.Join(whereParts, " OR ")
+	tableQ := quoteIdent(table)
+
+	countQ := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE (%s)", tableQ, whereClause)
+	var total int
+	if err := db.QueryRow(countQ, whereArgs...).Scan(&total); err != nil {
+		return searchPayload{}, err
+	}
+
+	items, err := fetchSearchItems(db, table, searchFields, idSelectName, limit, offset, whereClause, whereArgs...)
+	if err != nil {
+		return searchPayload{}, err
+	}
+
+	return searchPayload{
+		Query:          query,
+		MinQueryLength: searchMinChars,
+		Limit:          limit,
+		Offset:         offset,
+		Total:          total,
+		Returned:       len(items),
+		SearchFields:   searchFields,
+		Items:          items,
+	}, nil
+}
+
+func fetchSearchItems(db *sql.DB, table string, searchFields []string, idCol string, limit, offset int, whereClause string, whereArgs ...any) ([]map[string]any, error) {
+	tableQ := quoteIdent(table)
+	idColQ := quoteIdent(idCol)
+	orderClauses := make([]string, 0, len(searchFields)+3)
+	for _, f := range searchFields {
+		fq := quoteIdent(f)
+		orderClauses = append(orderClauses, fmt.Sprintf("CASE WHEN %s LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END", fq))
+	}
+	orderClauses = append(orderClauses, "rating_count DESC", "rating_value DESC", quoteIdent("name")+" ASC")
+	orderClause := strings.Join(orderClauses, ", ")
+
+	args := make([]any, 0, len(whereArgs)+len(searchFields)+2)
+	args = append(args, whereArgs...)
+	prefixPattern := strings.TrimSuffix(whereArgs[0].(string), "%") // "%query" -> "%query" not what we need; replaced below
+	_ = prefixPattern
+	// Use q% ranking pattern derived from the substring pattern input.
+	if len(whereArgs) > 0 {
+		substrPattern, _ := whereArgs[0].(string)
+		trimmed := strings.TrimPrefix(strings.TrimSuffix(substrPattern, "%"), "%")
+		prefix := trimmed + "%"
+		for range searchFields {
+			args = append(args, prefix)
+		}
+	}
+	args = append(args, limit, offset)
+
+	q := fmt.Sprintf(
+		`SELECT %s, name, brand, price_eur, currency, category_path, rating_value, rating_count
+		 FROM %s
+		 WHERE (%s)
+		 ORDER BY %s
+		 LIMIT ? OFFSET ?`,
+		idColQ, tableQ, whereClause, orderClause,
+	)
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		var idVal, name, brand, currency, category sql.NullString
+		var price sql.NullFloat64
+		var ratingVal sql.NullFloat64
+		var ratingCount sql.NullInt64
+		if err := rows.Scan(&idVal, &name, &brand, &price, &currency, &category, &ratingVal, &ratingCount); err != nil {
+			return nil, err
+		}
+		id := idVal.String
+		item := map[string]any{
+			"id":            id,
+			"name":          name.String,
+			"brand":         brand.String,
+			"price_eur":     price.Float64,
+			"currency":      currency.String,
+			"category_path": category.String,
+			"rating_value":  ratingVal.Float64,
+			"rating_count":  ratingCount.Int64,
+			"product_path":  "/product/" + id,
+		}
+		if idCol == "gtin" {
+			item["gtin"] = id
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func escapeLikePattern(s string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(s)
+}
+
+func parseIntQueryParam(r *http.Request, key string, fallback int) int {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 func normalizeValue(v any) any {
