@@ -49,3 +49,7 @@ __pycache__/
 /outputs/sample_products_all.jl
 
 outputs
+
+# Local test fixtures (keep directory only)
+testdata/*.csv
+!testdata/.gitkeep
