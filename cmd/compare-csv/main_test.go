@@ -366,6 +366,48 @@ func TestCompareCSV_DuplicateCandidateKeyCausesPartialAlignment(t *testing.T) {
 	}
 }
 
+func TestCompareCSV_DuplicateReferenceKeyCausesPartialAlignment(t *testing.T) {
+	tmpDir := t.TempDir()
+	referenceDup := filepath.Join(tmpDir, "reference_duplicate_key.csv")
+	const referenceKey = "gtin"
+
+	baseRows, err := readCSVRows(testdataPath("sample_products_reference_500.csv"))
+	if err != nil {
+		t.Fatalf("readCSVRows error: %v", err)
+	}
+	rowIdx := firstRowIndexWithNonEmptyColumn(baseRows.Header, baseRows.Records, referenceKey)
+	if rowIdx < 0 {
+		t.Fatalf("no reference row with non-empty %s found", referenceKey)
+	}
+	if err := writeCSVWithDuplicateRow(testdataPath("sample_products_reference_500.csv"), referenceDup, rowIdx); err != nil {
+		t.Fatalf("writeCSVWithDuplicateRow error: %v", err)
+	}
+
+	ref, err := loadCSV(referenceDup)
+	if err != nil {
+		t.Fatalf("loadCSV reference error: %v", err)
+	}
+	cand, err := loadCSV(testdataPath("sample_products_candidate1_500.csv"))
+	if err != nil {
+		t.Fatalf("loadCSV candidate error: %v", err)
+	}
+	// This test intentionally targets row-alignment duplicate handling directly.
+	// End-to-end key selection under duplicates is heuristic and covered separately.
+	alignment := alignRowsByKey(ref, cand, referenceKey, "gtin_code")
+	if alignment.Complete {
+		t.Fatalf("expected incomplete alignment with duplicated reference key row")
+	}
+	if alignment.DuplicateReferenceKeys < 1 {
+		t.Fatalf("expected duplicate reference keys > 0, got %d", alignment.DuplicateReferenceKeys)
+	}
+	if !(alignment.CoverageReference < 1.0) {
+		t.Fatalf("expected reference coverage < 1.0, got %.15f", alignment.CoverageReference)
+	}
+	if !almostEqual(alignment.CoverageCandidate, 1.0) {
+		t.Fatalf("expected candidate coverage 1.0, got %.15f", alignment.CoverageCandidate)
+	}
+}
+
 func TestCompareCSV_AlternateKeyChosenWhenGTINColumnMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	candidateNoGTIN := filepath.Join(tmpDir, "candidate_no_gtin.csv")
