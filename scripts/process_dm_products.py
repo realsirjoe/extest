@@ -12,7 +12,7 @@ import pandas as pd
 
 INPUT_PATH = Path("dm_products_all.jl")
 OUTPUT_DIR = Path("outputs")
-CSV_PATH = OUTPUT_DIR / "dm_products_cleaned.csv"
+CSV_PATH = OUTPUT_DIR / "dm_products_reference.csv"
 SQLITE_PATH = OUTPUT_DIR / "dm_products_cleaned.sqlite"
 PROFILE_PATH = OUTPUT_DIR / "dm_products_profile.md"
 

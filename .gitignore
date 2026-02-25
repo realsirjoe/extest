@@ -34,6 +34,10 @@ vendor/
 .idea/
 .vscode/
 
+# Python caches
+__pycache__/
+*.pyc
+
 # Local env files
 .env
 .env.*
